@@ -63,8 +63,8 @@ function createCurrentSourceMessageTool(
     runId: "webchat-run",
     sandboxRoot: params.sandboxFsBridge ? params.workspaceDir : undefined,
     getScopedChannelsCommandSecretTargets: () => ({ targetIds: new Set<string>() }),
-    resolveCommandSecretRefsViaGateway: async ({ config }) => ({
-      resolvedConfig: config,
+    resolveCommandSecretRefsViaGateway: async ({ config: commandConfig }) => ({
+      resolvedConfig: commandConfig,
       diagnostics: [],
       targetStatesByPath: {},
       hadUnresolvedTargets: false,
@@ -279,7 +279,6 @@ describe("WebChat message tool internal source reply", () => {
     });
     const { replyPayloads: payloads } = await buildReplyPayloads({
       payloads: embeddedPayloads,
-      isHeartbeat: false,
       didLogHeartbeatStrip: false,
       blockStreamingEnabled: false,
       blockReplyPipeline: null,
