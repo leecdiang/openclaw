@@ -45,7 +45,7 @@ export function createRuntimeAuthProfileRowsCache(
   revisionAtPath: (path: string) => string,
   waitForSourcePublication: (databasePath: string) => Promise<void>,
 ) {
-  type Refresh = () => Promise<AuthProfileRowRead>;
+  type Refresh = () => Promise<AuthProfileRowRead | undefined>;
   type Entry = {
     identity: string | undefined;
     writeToken: string | undefined;
@@ -170,6 +170,9 @@ export function createRuntimeAuthProfileRowsCache(
               let source: AuthProfileStore | undefined;
               try {
                 rows = await entry.refresh();
+                if (!rows) {
+                  continue;
+                }
                 source = sourceFromRows(rows, databasePath);
               } catch {
                 // A failed external reread cannot certify the cached credential facts.

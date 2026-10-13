@@ -59,17 +59,34 @@ const missing: AuthProfileRowRead = {
 export async function readAuthProfileRowsAtPath(
   databasePath: string,
   env: NodeJS.ProcessEnv,
-): Promise<AuthProfileRowRead> {
+): Promise<AuthProfileRowRead | undefined> {
   const context = captureOpenClawStateWorkerContext({ env });
-  if (databasePath === context.admission.databasePath) {
-    return readSharedAuthProfileRows(context);
-  }
-  const reader = prepareAgentAuthProfileRowsRead({
-    databasePath,
-    agentId: resolveAuthProfileDatabaseOwnerId(path.dirname(databasePath)),
-    env,
-  });
-  return withAuthProfileCleanup(reader.read, () => reader.dispose());
+  const reader =
+    databasePath === context.admission.databasePath
+      ? undefined
+      : prepareAgentAuthProfileRowsRead({
+          databasePath,
+          agentId: resolveAuthProfileDatabaseOwnerId(path.dirname(databasePath)),
+          env,
+        });
+  const read = async () => {
+    try {
+      return await (reader ? reader.read() : readSharedAuthProfileRows(context));
+    } catch (error) {
+      // Retirement cancels observation without establishing a change in persisted credentials.
+      if (reader?.signal.aborted) {
+        return undefined;
+      }
+      try {
+        context.admission.assertCurrent();
+        context.maintenanceScope?.assertAdmission();
+      } catch {
+        return undefined;
+      }
+      throw error;
+    }
+  };
+  return reader ? withAuthProfileCleanup(read, () => reader.dispose()) : read();
 }
 
 function isInspection(value: unknown): value is PersistedAuthProfileStoreInspection {
@@ -92,6 +109,7 @@ export function prepareAgentAuthProfileRowsRead(options: {
   captureCredentialAuthority: (
     profileId: string,
   ) => ReturnType<typeof captureAuthProfileCredentialAuthority> | undefined;
+  signal: AbortSignal;
   read: () => Promise<AuthProfileRowRead>;
   assertCurrent: () => void;
   dispose: () => Promise<void>;
@@ -249,6 +267,7 @@ export function prepareAgentAuthProfileRowsRead(options: {
           )
         : undefined;
     },
+    signal: controller.signal,
     read,
     assertCurrent,
     dispose,

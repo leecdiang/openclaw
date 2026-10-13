@@ -6,7 +6,8 @@ import { createDeferredCore } from "../../shared/deferred.js";
 import * as resources from "../../state/openclaw-agent-db-resources.js";
 import * as rootContext from "../../state/openclaw-state-worker-context.js";
 import { closeAuthProfileFileState, registerAuthProfileFileChangeListener } from "./file-state.js";
-import { prepareAgentAuthProfileRowsRead } from "./sqlite-read.js";
+import { createRuntimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
+import { prepareAgentAuthProfileRowsRead, readAuthProfileRowsAtPath } from "./sqlite-read.js";
 import type { AuthProfileRowRead } from "./types.js";
 
 const child = vi.hoisted(() => ({ read: vi.fn() }));
@@ -75,6 +76,42 @@ afterEach(async () => {
 });
 
 describe("prepared auth profile row reads", () => {
+  it("retains source authority when database retirement cancels an observation", async () => {
+    const cache = createRuntimeAuthProfileRowsCache(
+      () => "1",
+      async () => {},
+    );
+    cache.recordSource(databasePath, "source", { version: 1, profiles: {} }, () =>
+      readAuthProfileRowsAtPath(databasePath, { OPENCLAW_STATE_DIR: "/fixture" }),
+    );
+    const entered = createDeferredCore();
+    child.read.mockImplementationOnce(
+      (_path: string, options: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+            once: true,
+          });
+          entered.resolve();
+        }),
+    );
+    const observing = cache.refreshChanged(path.dirname(databasePath));
+    await entered.promise;
+    await Promise.all(resources.revokeAgentDatabaseResources({ path: databasePath }));
+    expect(await observing).toEqual([]);
+
+    child.read.mockResolvedValueOnce({
+      ...rows,
+      store: {
+        status: "readable",
+        raw: {
+          version: 1,
+          profiles: { fixture: { type: "api_key", provider: "openai", key: "changed" } },
+        },
+      },
+    });
+    expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+  });
+
   it("serves prepared file authority without filesystem calls on subsequent reads", async () => {
     const reader = prepare();
     const realpath = vi.spyOn(fs.realpathSync, "native");
