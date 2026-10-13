@@ -4,7 +4,10 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type { Result } from "@openclaw/normalization-core/result";
 import { cloneEnvWithPlatformSemantics } from "../../config/config-env-vars.js";
 import { runSqliteReadOnlyWorker } from "../../infra/sqlite-readonly-worker.js";
-import { inspectDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
+import {
+  assertExistingDatabaseIdentity,
+  inspectDatabasePathIdentitySync,
+} from "../../infra/sqlite-worker-identity.js";
 import { createSqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "../../state/openclaw-state-db-cache.js";
@@ -116,11 +119,8 @@ export function prepareAgentAuthProfileRowsRead(options: {
     captured.value.admission.assertCurrent();
     captured.value.maintenanceScope?.assertAdmission();
     // Captured absence stays empty; a first session may create the file without replacing a read source.
-    if (
-      identity?.key.startsWith("file:") &&
-      inspectDatabasePathIdentitySync(databasePath)?.key !== identity.key
-    ) {
-      throw new Error("Auth profile database file identity changed during its read");
+    if (identity?.key.startsWith("file:")) {
+      assertExistingDatabaseIdentity(databasePath, identity.key, identity.birthtime);
     }
     // Cached rows still borrow this read's revocable authority through host composition.
     if (!closed) {
