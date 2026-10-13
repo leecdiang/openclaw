@@ -97,57 +97,64 @@ async function withReceiptFixture(
 }
 
 describe("canonical proof on physical database validation", () => {
-  it("retains read validation and observation across native handle closure", async () => {
-    await withReceiptFixture(false, (database) => {
-      const captured = captureOpenClawAgentDatabaseReadValidation(database);
-      expect(captured?.canonicalPath).toBe(database.path);
-      const realpath = vi.spyOn(fs.realpathSync, "native");
-      const stat = vi.spyOn(fs, "statSync");
-      syncBuiltinESMExports();
-      try {
-        const warm = captureOpenClawAgentDatabaseReadValidation(database);
-        expect(warm?.validation.receiptId).toBe(captured?.validation.receiptId);
-        captured!.assertCurrent();
-        warm!.assertCurrent();
-        expect(realpath).not.toHaveBeenCalled();
-        expect(stat).not.toHaveBeenCalled();
-      } finally {
-        realpath.mockRestore();
-        stat.mockRestore();
+  it.each(["observation", "reader admission"] as const)(
+    "retains read validation across native close and detects replacement through %s",
+    async (invalidation) => {
+      await withReceiptFixture(false, (database) => {
+        const captured = captureOpenClawAgentDatabaseReadValidation(database);
+        expect(captured?.canonicalPath).toBe(database.path);
+        const realpath = vi.spyOn(fs.realpathSync, "native");
+        const stat = vi.spyOn(fs, "statSync");
         syncBuiltinESMExports();
-      }
-      closeOpenClawAgentDatabaseByPath(database.path);
-      expect(
-        observedValidationDirectories.some(
-          (observer) => observer.active && observer.directory === path.dirname(database.path),
-        ),
-      ).toBe(true);
-      expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
-        captured?.validation.receiptId,
-      );
-      const replacement = `${database.path}.replacement`;
-      fs.copyFileSync(database.path, replacement);
-      fs.renameSync(replacement, database.path);
-      expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(1);
-      expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
-        captured?.validation.receiptId,
-      );
-      for (const observer of observedValidationDirectories) {
-        if (observer.active && observer.directory === path.dirname(database.path)) {
-          observer.notify(path.basename(database.path));
+        try {
+          const warm = captureOpenClawAgentDatabaseReadValidation(database);
+          expect(warm?.validation.receiptId).toBe(captured?.validation.receiptId);
+          captured!.assertCurrent();
+          warm!.assertCurrent();
+          expect(realpath).not.toHaveBeenCalled();
+          expect(stat).not.toHaveBeenCalled();
+        } finally {
+          realpath.mockRestore();
+          stat.mockRestore();
+          syncBuiltinESMExports();
         }
-      }
-      expect(() => captured!.assertCurrent()).toThrow(
-        "Session reader validation is no longer current",
-      );
-      expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(0);
-      expect(
-        observedValidationDirectories.some(
-          (observer) => observer.active && observer.directory === path.dirname(database.path),
-        ),
-      ).toBe(false);
-    });
-  });
+        closeOpenClawAgentDatabaseByPath(database.path);
+        expect(
+          observedValidationDirectories.some(
+            (observer) => observer.active && observer.directory === path.dirname(database.path),
+          ),
+        ).toBe(true);
+        expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
+          captured?.validation.receiptId,
+        );
+        const replacement = `${database.path}.replacement`;
+        fs.copyFileSync(database.path, replacement);
+        fs.renameSync(replacement, database.path);
+        expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(1);
+        expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
+          captured?.validation.receiptId,
+        );
+        if (invalidation === "reader admission") {
+          expect(captureOpenClawAgentDatabaseReadValidation(database, "admission")).toBeUndefined();
+        } else {
+          for (const observer of observedValidationDirectories) {
+            if (observer.active && observer.directory === path.dirname(database.path)) {
+              observer.notify(path.basename(database.path));
+            }
+          }
+        }
+        expect(() => captured!.assertCurrent()).toThrow(
+          "Session reader validation is no longer current",
+        );
+        expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(0);
+        expect(
+          observedValidationDirectories.some(
+            (observer) => observer.active && observer.directory === path.dirname(database.path),
+          ),
+        ).toBe(false);
+      });
+    },
+  );
 
   it("rejects a replaced file at receiver and queued write admission before observation", async () => {
     await withReceiptFixture(false, async (database, options) => {

@@ -67,17 +67,20 @@ const validatedPaths = resolveGlobalSingleton<Map<string, ValidationEntry>>(
   () => new Map(),
   () => clearOpenClawAgentDatabaseValidationCache(),
 );
-const validationObservations = resolveGlobalSingleton<Map<string, { close(): void }>>(
-  Symbol.for("openclaw.agentDatabaseValidationObservations"),
-  () => new Map(),
-);
+const validationObservations = resolveGlobalSingleton<
+  Map<string, { close(): void; revalidate(): void }>
+>(Symbol.for("openclaw.agentDatabaseValidationObservations"), () => new Map());
 
 function releaseValidationObservation(pathname: string): void {
   validationObservations.get(pathname)?.close();
 }
 
-function observeValidationPath(pathname: string): void {
-  if (validationObservations.has(pathname)) {
+function observeValidationPath(pathname: string, admission: boolean): void {
+  const existing = validationObservations.get(pathname);
+  if (existing) {
+    if (admission) {
+      existing.revalidate();
+    }
     return;
   }
   const revalidate = () => {
@@ -103,6 +106,7 @@ function observeValidationPath(pathname: string): void {
   });
   // Retained proof outlives native handles; its cache owns observation cleanup.
   validationObservations.set(pathname, {
+    revalidate,
     close() {
       watched.close();
       validationObservations.delete(pathname);
@@ -308,6 +312,7 @@ export function getOpenClawAgentDatabaseValidationForTransfer(
 /** Readers borrow physical/canonical proof without copying the schema catalog or opening a host handle. */
 export function captureOpenClawAgentDatabaseReadValidation(
   database: Pick<ValidationDatabase, "agentId" | "path">,
+  mode: "retained" | "admission" = "retained",
 ) {
   const current = getOpenClawAgentDatabaseValidationForTransfer(database);
   if (!current) {
@@ -315,7 +320,7 @@ export function captureOpenClawAgentDatabaseReadValidation(
   }
   let canonicalPath = database.path;
   if (validatedPaths.has(canonicalPath)) {
-    observeValidationPath(canonicalPath);
+    observeValidationPath(canonicalPath, mode === "admission");
     if (Atomics.load(new Int32Array(current.valid), 0) !== 1) {
       return undefined;
     }
