@@ -62,6 +62,14 @@ export function createRuntimeAuthProfileRowsCache(
   const isCurrent = (databasePath: string, entry: Entry) =>
     entries.get(databasePath) === entry && hasCurrentSource(databasePath, entry);
   return {
+    hasSource(databasePath: string): boolean {
+      const entry = entries.get(databasePath);
+      return Boolean(
+        entry?.refresh &&
+        revisionAtPath(databasePath) === entry.revision &&
+        (entry.writeToken === undefined || hasCurrentSource(databasePath, entry)),
+      );
+    },
     recordSource(
       databasePath: string,
       identity: string,
@@ -256,7 +264,6 @@ export function createRuntimeAuthProfileRowsCache(
           const rows = await reader.read();
           reader.assertCurrent();
           if (
-            rows.cacheable &&
             rows.store.status !== "unreadable" &&
             rows.state.status !== "unreadable" &&
             revisionAtPath(databasePath) === revision &&
@@ -269,7 +276,7 @@ export function createRuntimeAuthProfileRowsCache(
               identity: reader.identity,
               writeToken,
               revision,
-              ...(writeToken === undefined ? {} : { rows }),
+              ...(rows.cacheable && writeToken !== undefined ? { rows } : {}),
               source: sourceFromRows(rows, databasePath),
               refresh,
             });

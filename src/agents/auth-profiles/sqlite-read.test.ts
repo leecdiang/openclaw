@@ -112,6 +112,28 @@ describe("prepared auth profile row reads", () => {
     expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
   });
 
+  it("retains source authority when an observation starts during database retirement", async () => {
+    const entered = createDeferredCore();
+    const release = createDeferredCore();
+    const closing = resources.drainAgentDatabaseResources({ path: databasePath }, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    try {
+      await expect(
+        readAuthProfileRowsAtPath(databasePath, { OPENCLAW_STATE_DIR: "/fixture" }),
+      ).resolves.toBeUndefined();
+      expect(child.read).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await closing;
+    }
+    await expect(
+      readAuthProfileRowsAtPath(databasePath, { OPENCLAW_STATE_DIR: "/fixture" }),
+    ).resolves.toEqual(rows);
+  });
+
   it("serves prepared file authority without filesystem calls on subsequent reads", async () => {
     const reader = prepare();
     const realpath = vi.spyOn(fs.realpathSync, "native");

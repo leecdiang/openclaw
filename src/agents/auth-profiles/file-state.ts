@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { registerAgentDatabaseReaderCloser } from "../../infra/agent-database-readers.js";
+import {
+  matchesAgentDatabaseReadCandidatePath,
+  registerAgentDatabaseReaderCloser,
+} from "../../infra/agent-database-readers.js";
 import { hasErrnoCode } from "../../infra/errno.js";
 import { observeOwnedDirectory } from "../../infra/owned-directory-observation.js";
 import {
@@ -16,9 +19,13 @@ import { registerOpenClawStateDatabaseAsyncResource } from "../../state/openclaw
 import { getOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-maintenance-context.js";
 import { waitForAuthProfileNativePublications } from "./store-update-commit.js";
 
-type FileChange = { directory: string; identityChanged: boolean; sourcesChanged: boolean };
+type FileChange = {
+  directory: string;
+  identityChanged: boolean;
+  sourcesChanged: boolean;
+  createdPaths: readonly string[];
+};
 type DirectoryState = {
-  revision: number;
   identities: Map<string, DatabasePathIdentity | undefined>;
   presence: Map<string, boolean>;
   observation: { close(): void };
@@ -32,7 +39,6 @@ const listeners = new Set<FileChangeListener>();
 const legacyNames = new Set(["auth-profiles.json", "auth-state.json", "auth.json", "oauth.json"]);
 
 function retireDirectory(directory: string, state: DirectoryState): void {
-  state.revision += 1;
   state.observation.close();
   directories.delete(directory);
 }
@@ -40,7 +46,18 @@ function retireDirectory(directory: string, state: DirectoryState): void {
 registerOpenClawStateDatabaseAsyncResource({ close: async () => closeAuthProfileFileState() });
 registerAgentDatabaseReaderCloser((candidates, retainedPaths) => {
   for (const [directory, state] of directories) {
+    for (const databasePath of state.identities.keys()) {
+      if (
+        !retainedPaths?.has(path.resolve(databasePath)) &&
+        candidates.some((candidate) =>
+          matchesAgentDatabaseReadCandidatePath(candidate, databasePath),
+        )
+      ) {
+        state.identities.delete(databasePath);
+      }
+    }
     if (
+      !state.identities.size &&
       candidates.some(
         ({ path: pathname }) =>
           path.dirname(path.resolve(pathname)) === directory &&
@@ -67,6 +84,7 @@ function refreshDirectory(directory: string, state: DirectoryState): Promise<voi
           return;
         }
         let identityChanged = false;
+        const createdPaths: string[] = [];
         let sourcesChanged = false;
         for (const [databasePath, previous] of state.identities) {
           const current = await stat(databasePath, { bigint: true })
@@ -88,7 +106,11 @@ function refreshDirectory(directory: string, state: DirectoryState): Promise<voi
             continue;
           }
           if (current?.key !== previous?.key || current?.birthtime !== previous?.birthtime) {
-            identityChanged = true;
+            if (previous?.key.startsWith("path:") && current?.key.startsWith("file:")) {
+              createdPaths.push(databasePath);
+            } else {
+              identityChanged = true;
+            }
             state.identities.set(databasePath, current);
           }
         }
@@ -105,13 +127,12 @@ function refreshDirectory(directory: string, state: DirectoryState): Promise<voi
             state.presence.set(sourcePath, current);
           }
         }
-        if (identityChanged) {
-          state.revision += 1;
-        }
         if (state.identities.size || sourcesChanged) {
           await Promise.all(
             Array.from(listeners, (listener) =>
-              Promise.resolve(listener({ directory, identityChanged, sourcesChanged })),
+              Promise.resolve(
+                listener({ directory, identityChanged, sourcesChanged, createdPaths }),
+              ),
             ),
           );
         }
@@ -130,7 +151,6 @@ function directoryState(directory: string): DirectoryState {
   }
   const identities: DirectoryState["identities"] = new Map();
   const state: DirectoryState = {
-    revision: 0,
     identities,
     presence: new Map(),
     dirty: false,
@@ -166,11 +186,14 @@ export function readAuthProfileDatabaseIdentity(
 export function captureAuthProfileFileIdentity(databasePath: string) {
   const identity = readAuthProfileDatabaseIdentity(databasePath);
   const state = directoryState(path.dirname(databasePath));
-  const revision = state.revision;
   return {
     identity,
     assertCurrent() {
-      if (state.revision !== revision || directories.get(path.dirname(databasePath)) !== state) {
+      if (
+        !state.identities.has(databasePath) ||
+        state.identities.get(databasePath) !== identity ||
+        directories.get(path.dirname(databasePath)) !== state
+      ) {
         throw new Error("Auth profile database file identity changed");
       }
     },

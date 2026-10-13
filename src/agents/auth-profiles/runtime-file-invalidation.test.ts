@@ -15,6 +15,7 @@ const observation = vi.hoisted(() => ({
       directory: string;
       identityChanged: boolean;
       sourcesChanged: boolean;
+      createdPaths: readonly string[];
     }) => void | Promise<void>
   >(),
 }));
@@ -32,6 +33,7 @@ vi.mock("./file-state.js", () => ({
       directory: string;
       identityChanged: boolean;
       sourcesChanged: boolean;
+      createdPaths: readonly string[];
     }) => void | Promise<void>,
   ) => {
     observation.listeners.add(listener);
@@ -57,10 +59,11 @@ function publishAgent(key: string): void {
 
 function observeSharedReplacement(): void {
   for (const listener of observation.listeners) {
-    listener({
+    void listener({
       directory: path.dirname(sharedDatabase),
       identityChanged: true,
       sourcesChanged: false,
+      createdPaths: [],
     });
   }
 }
@@ -84,11 +87,14 @@ function observeSharedRowChange(): Promise<void[]> {
   );
   return Promise.all(
     [...observation.listeners].map((listener) =>
-      listener({
-        directory: path.dirname(sharedDatabase),
-        identityChanged: false,
-        sourcesChanged: false,
-      }),
+      Promise.resolve(
+        listener({
+          directory: path.dirname(sharedDatabase),
+          identityChanged: false,
+          sourcesChanged: false,
+          createdPaths: [],
+        }),
+      ),
     ),
   );
 }
@@ -207,3 +213,33 @@ it("invalidates changed shared credentials despite an unrelated snapshot publica
   expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase)).toBeUndefined();
   expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(unrelated)).toBeDefined();
 });
+
+it.each([false, true])(
+  "checks first-file contents only with known source provenance: %s",
+  async (knownSource) => {
+    registerRuntimeAuthProfileExternalRefresh(async () => true);
+    publishAgent("inherited");
+    if (knownSource) {
+      runtimeAuthProfileRowsCache.recordSource(sharedDatabase, "absent", null, async () => ({
+        store: { status: "missing", reason: "table" },
+        state: { status: "missing", reason: "table" },
+        cacheable: false,
+      }));
+    }
+    await Promise.all(
+      [...observation.listeners].map((listener) =>
+        Promise.resolve(
+          listener({
+            directory: path.dirname(sharedDatabase),
+            identityChanged: false,
+            sourcesChanged: false,
+            createdPaths: [sharedDatabase],
+          }),
+        ),
+      ),
+    );
+    expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase) !== undefined).toBe(
+      knownSource,
+    );
+  },
+);

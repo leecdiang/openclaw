@@ -6,6 +6,7 @@ import { cloneEnvWithPlatformSemantics } from "../../config/config-env-vars.js";
 import { runSqliteReadOnlyWorker } from "../../infra/sqlite-readonly-worker.js";
 import { inspectDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
 import { createSqliteWorkerOperationAdmission } from "../../infra/sqlite-worker-operation-admission.js";
+import { AgentDatabaseExecutionAdmissionClosedError } from "../../state/agent-database-admission-error.js";
 import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "../../state/openclaw-state-db-cache.js";
 import {
@@ -74,7 +75,7 @@ export async function readAuthProfileRowsAtPath(
       return await (reader ? reader.read() : readSharedAuthProfileRows(context));
     } catch (error) {
       // Retirement cancels observation without establishing a change in persisted credentials.
-      if (reader?.signal.aborted) {
+      if (reader?.signal.aborted || error instanceof AgentDatabaseExecutionAdmissionClosedError) {
         return undefined;
       }
       try {

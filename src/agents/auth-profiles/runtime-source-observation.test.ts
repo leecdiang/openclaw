@@ -36,3 +36,34 @@ it("retains unchanged source authority when observation cannot cache its rows", 
   };
   expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
 });
+
+it("observes credentials appearing after a canonical read of an absent database", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-first-file-"), "auth.sqlite");
+  const cache = createRuntimeAuthProfileRowsCache(
+    () => "1",
+    async () => {},
+  );
+  const absent: AuthProfileRowRead = {
+    store: { status: "missing", reason: "database" },
+    state: { status: "missing", reason: "database" },
+    cacheable: false,
+  };
+  let observed = absent;
+  await cache
+    .prepare(databasePath, { read: async () => absent, assertCurrent() {} }, async () => observed)
+    .read();
+
+  observed = { ...absent, store: { status: "missing", reason: "table" } };
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([]);
+  observed = {
+    ...absent,
+    store: {
+      status: "readable",
+      raw: {
+        version: 1,
+        profiles: { fixture: { type: "api_key", provider: "openai", key: "external" } },
+      },
+    },
+  };
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+});

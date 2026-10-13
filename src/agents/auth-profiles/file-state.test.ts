@@ -16,6 +16,7 @@ import {
   refreshAuthProfileFileState,
   registerAuthProfileFileChangeListener,
 } from "./file-state.js";
+import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
@@ -220,4 +221,76 @@ it("retires observations with the database owner", async () => {
   });
   expect(() => captured.assertCurrent()).toThrow("database file identity changed");
   expect(() => captureAuthProfileFileIdentity(databasePath).assertCurrent()).not.toThrow();
+});
+
+it("keeps physical file authority through logical snapshot reset", () => {
+  const directory = temporary.make("auth-file-logical-reset-");
+  const databasePath = path.join(directory, "openclaw-agent.sqlite");
+  fs.writeFileSync(databasePath, "synthetic database");
+  const captured = captureAuthProfileFileIdentity(databasePath);
+  clearRuntimeAuthProfileStoreSnapshots();
+  expect(() => captured.assertCurrent()).not.toThrow();
+  closeAuthProfileFileState();
+  expect(() => captured.assertCurrent()).toThrow("database file identity changed");
+});
+
+it("keeps sibling file authority when another database is replaced or retired", async () => {
+  const directory = temporary.make("auth-file-siblings-");
+  const first = path.join(directory, "first.sqlite");
+  const second = path.join(directory, "second.sqlite");
+  fs.writeFileSync(first, "first synthetic database");
+  fs.writeFileSync(second, "second synthetic database");
+  const retained = captureAuthProfileFileIdentity(first);
+  const replaced = captureAuthProfileFileIdentity(second);
+  fs.writeFileSync(`${second}.replacement`, "replacement synthetic database");
+  fs.renameSync(`${second}.replacement`, second);
+  await refreshAuthProfileFileState();
+  expect(() => retained.assertCurrent()).not.toThrow();
+  expect(() => replaced.assertCurrent()).toThrow("database file identity changed");
+  const retired = captureAuthProfileFileIdentity(second);
+  await applyAgentDatabaseReaderRequest({
+    kind: "close",
+    candidates: [{ path: first }, { path: second }],
+    retainedPaths: [first],
+    deleted: false,
+  });
+  expect(() => retained.assertCurrent()).not.toThrow();
+  expect(() => retired.assertCurrent()).toThrow("database file identity changed");
+});
+
+it("reports a first database file separately from a replaced credential source", async () => {
+  const directory = temporary.make("auth-file-first-session-");
+  const databasePath = path.join(directory, "openclaw-agent.sqlite");
+  readAuthProfileDatabaseIdentity(databasePath);
+  const changes: Array<{ identityChanged: boolean; createdPaths: readonly string[] }> = [];
+  const unsubscribe = registerAuthProfileFileChangeListener((change) => {
+    if (change.directory === directory) {
+      changes.push(change);
+    }
+  });
+  try {
+    fs.writeFileSync(databasePath, "first synthetic database");
+    await refreshAuthProfileFileState();
+    expect(changes).toContainEqual(
+      expect.objectContaining({
+        identityChanged: false,
+        createdPaths: [databasePath],
+      }),
+    );
+  } finally {
+    unsubscribe();
+  }
+});
+
+it("retires legacy source observations when their agent database closes", async () => {
+  const directory = temporary.make("auth-file-presence-retirement-");
+  const legacyPath = path.join(directory, "auth.json");
+  expect(authProfileSourceExists(legacyPath)).toBe(false);
+  await applyAgentDatabaseReaderRequest({
+    kind: "close",
+    candidates: [{ path: path.join(directory, "openclaw-agent.sqlite") }],
+    deleted: false,
+  });
+  fs.writeFileSync(legacyPath, "{}");
+  expect(authProfileSourceExists(legacyPath)).toBe(true);
 });

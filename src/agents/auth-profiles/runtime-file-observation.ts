@@ -6,7 +6,6 @@ import { isArtifactPreservingStateRead } from "../../state/artifact-preserving-s
 import { getOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-maintenance-context.js";
 import { reportCommittedInlineAuthFailure } from "./constants.js";
 import {
-  closeAuthProfileFileState,
   readAuthProfileDatabaseIdentity,
   refreshAuthProfileFileState,
   registerAuthProfileFileChangeListener,
@@ -44,7 +43,7 @@ export function createRuntimeAuthProfileFileObservation({
       return;
     }
     const identity = readAuthProfileDatabaseIdentity(databasePath);
-    if (!identity?.key.startsWith("file:")) {
+    if (!identity) {
       return;
     }
     const capturedEnv = cloneEnvWithPlatformSemantics(env);
@@ -115,32 +114,35 @@ export function createRuntimeAuthProfileFileObservation({
     });
   }
 
-  registerAuthProfileFileChangeListener(({ directory, identityChanged, sourcesChanged }) => {
-    if (identityChanged || sourcesChanged) {
-      const paths = [...snapshots].flatMap(([key, entry]) => {
-        const candidates = entry.legacyCandidates;
-        return path.dirname(key) === directory ||
-          (entry.owner.kind === "resolved" &&
-            path.dirname(entry.owner.sharedDatabasePath) === directory) ||
-          (sourcesChanged &&
-            candidates &&
-            [...candidates.local, ...candidates.shared].some(
-              (source) => path.dirname(source.path) === directory,
-            ))
-          ? [key]
-          : [];
-      });
-      invalidatePaths(paths);
-      refreshExternalAuthPaths(paths);
-    }
-    // Session writes share these files; only changed auth rows invalidate published credentials.
-    return rowsCache
-      .refreshChanged(directory)
-      .then(refreshExternalAuthPaths)
-      .catch((error: unknown) => {
-        reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
-      });
-  });
+  registerAuthProfileFileChangeListener(
+    ({ directory, identityChanged, sourcesChanged, createdPaths }) => {
+      const unprovenCreation = createdPaths.some((pathname) => !rowsCache.hasSource(pathname));
+      if (identityChanged || sourcesChanged || unprovenCreation) {
+        const paths = [...snapshots].flatMap(([key, entry]) => {
+          const candidates = entry.legacyCandidates;
+          return path.dirname(key) === directory ||
+            (entry.owner.kind === "resolved" &&
+              path.dirname(entry.owner.sharedDatabasePath) === directory) ||
+            (sourcesChanged &&
+              candidates &&
+              [...candidates.local, ...candidates.shared].some(
+                (source) => path.dirname(source.path) === directory,
+              ))
+            ? [key]
+            : [];
+        });
+        invalidatePaths(paths);
+        refreshExternalAuthPaths(paths);
+      }
+      // Session writes share these files; only changed auth rows invalidate published credentials.
+      return rowsCache
+        .refreshChanged(directory)
+        .then(refreshExternalAuthPaths)
+        .catch((error: unknown) => {
+          reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
+        });
+    },
+  );
 
   return {
     recordRuntimeAuthProfilePersistedStore,
@@ -149,7 +151,6 @@ export function createRuntimeAuthProfileFileObservation({
     reset() {
       externalRefreshRevision += 1;
       externalChanges.clear();
-      closeAuthProfileFileState();
     },
   };
 }
