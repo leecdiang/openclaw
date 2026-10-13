@@ -18,8 +18,11 @@ import {
   loadAuthProfileStoreWithoutExternalProfiles,
   saveAuthProfileStore,
 } from "../agents/auth-profiles/store-runtime.js";
+import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
+import { acquireStateDatabaseSchemaLease } from "../infra/gateway-state-owner.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
   activateSecretsRuntimeSnapshot,
   clearSecretsRuntimeSnapshot,
@@ -40,6 +43,20 @@ vi.mock("../infra/owned-directory-observation.js", () => ({
 }));
 
 const temporary = useAutoCleanupTempDirTracker(afterEach);
+function saveOwnedAuthProfiles(store: AuthProfileStore, agentDir: string) {
+  const lease = acquireStateDatabaseSchemaLease(resolveOpenClawStateSqlitePath());
+  try {
+    lease.run(() =>
+      saveAuthProfileStore(store, agentDir, {
+        filterExternalAuthProfiles: false,
+        syncExternalCli: false,
+      }),
+    );
+  } finally {
+    lease.release();
+  }
+}
+
 afterEach(async () => {
   clearSecretsRuntimeSnapshot();
   closeOpenClawAgentDatabasesForTest();
@@ -58,13 +75,12 @@ it.each(["native commit", "cold async read"] as const)(
       profiles: { example: { type: "api_key" as const, provider: "openai", key } },
     });
     if (initial === "native commit") {
-      const options = { filterExternalAuthProfiles: false, syncExternalCli: false };
-      saveAuthProfileStore(store("before"), agentDir, options);
+      saveOwnedAuthProfiles(store("before"), agentDir);
       setRuntimeAuthProfileStoreSnapshot(
         loadAuthProfileStoreWithoutExternalProfiles(agentDir),
         agentDir,
       );
-      saveAuthProfileStore(store("owned"), agentDir, options);
+      saveOwnedAuthProfiles(store("owned"), agentDir);
       const revision = getRuntimeAuthProfileStoreCredentialsRevision();
 
       await refreshAuthProfileFileState();
@@ -111,10 +127,7 @@ it.each(["observation", "explicit refresh"] as const)(
       version: 1,
       profiles: { example: { type: "api_key" as const, provider: "openai", key } },
     });
-    saveAuthProfileStore(store("synthetic-before"), agentDir, {
-      filterExternalAuthProfiles: false,
-      syncExternalCli: false,
-    });
+    saveOwnedAuthProfiles(store("synthetic-before"), agentDir);
     const snapshot = await prepareSecretsRuntimeSnapshot({
       config: {
         agents: { ownership: "explicit", entries: { main: { agentDir, workspace: root } } },
