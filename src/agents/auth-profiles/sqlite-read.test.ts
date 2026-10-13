@@ -88,7 +88,7 @@ describe("prepared auth profile row reads", () => {
     child.read.mockImplementationOnce(
       (_path: string, options: { signal: AbortSignal }) =>
         new Promise((_resolve, reject) => {
-          options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+          options.signal.addEventListener("abort", () => reject(new Error("Observation retired")), {
             once: true,
           });
           entered.resolve();
