@@ -453,7 +453,7 @@ describe("models.authStatus", () => {
   });
 
   it("waits for persisted source refresh before preparing refreshed credentials", async () => {
-    const sourceRefresh = createDeferred<void>();
+    const sourceRefresh = createDeferred();
     mocks.refreshRuntimeAuthProfileStoreSources.mockReturnValueOnce(sourceRefresh.promise);
     const pending = readAuthStatus({ refresh: true });
 

@@ -21,7 +21,6 @@ import {
   assertAuthProfileMigrationStateAtDatabasePath,
 } from "./legacy-source-diagnostic.js";
 import { resolveLegacyAuthProfileSourceCandidates } from "./legacy-source-files.js";
-import { withAuthProfileCleanup } from "./operation-cleanup.js";
 import {
   resolveSharedAuthStoreOwnershipAsync,
   resolveSharedAuthStorePath as resolveSharedAuthPath,
@@ -40,6 +39,7 @@ import { resolveSharedMainAuthAgentDir } from "./shared-main-dir.js";
 import {
   loadPersistedAuthProfileStoreFromRows,
   prepareAgentAuthProfileRowsRead,
+  readAuthProfileRowsAtPath,
   readSharedAuthProfileRows,
   readUserModelAuthProfileAsync,
 } from "./sqlite-read.js";
@@ -283,18 +283,6 @@ export function createAuthProfileStoreRuntimeReader({
     const inCapturedScope = <Value>(run: () => Value): Value =>
       scope.run(effectiveAgentDir, env, run);
     const rowsByPath = new Map<string, AuthProfileRowRead>();
-    const refreshRows = async (databasePath: string): Promise<AuthProfileRowRead> => {
-      const context = captureOpenClawStateWorkerContext({ env });
-      if (databasePath === context.admission.databasePath) {
-        return readSharedAuthProfileRows(context);
-      }
-      const reader = prepareAgentAuthProfileRowsRead({
-        databasePath,
-        agentId: resolveAuthProfileDatabaseOwnerId(path.dirname(databasePath)),
-        env,
-      });
-      return withAuthProfileCleanup(reader.read, () => reader.dispose());
-    };
     const stores = new Map<string, Result<AuthProfileStore, unknown>>();
     let active = true;
     let accepting = true;
@@ -334,7 +322,7 @@ export function createAuthProfileStoreRuntimeReader({
           ? runtimeAuthProfileRowsCache.prepare(
               databasePath,
               reader,
-              () => refreshRows(databasePath),
+              () => readAuthProfileRowsAtPath(databasePath, env),
               !scope.isolated,
             )
           : reader);

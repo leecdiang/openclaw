@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
@@ -62,7 +63,7 @@ it("publishes a first owner write immediately and keeps same-file writes from re
   fs.writeFileSync(databasePath, "session-only write in the same file");
   await vi.advanceTimersByTimeAsync(30_000);
   await changed;
-  expect(captured.assertCurrent).not.toThrow();
+  expect(() => captured.assertCurrent()).not.toThrow();
 });
 
 it("publishes a first owner write to previously admitted directory aliases", () => {
@@ -82,7 +83,30 @@ it("publishes a first owner write to previously admitted directory aliases", () 
   const current = captureAuthProfileFileIdentity(aliasPath);
   expect(current.identity?.key).toMatch(/^file:/);
   expect(current.identity?.canonicalPath).toBe(before?.canonicalPath);
-  expect(current.assertCurrent).not.toThrow();
+  expect(() => current.assertCurrent()).not.toThrow();
+});
+
+it("keeps first-write authority when publication overtakes an observed file read", async () => {
+  const directory = temporary.make("auth-file-publication-race-");
+  const databasePath = path.join(directory, "openclaw-agent.sqlite");
+  readAuthProfileDatabaseIdentity(databasePath);
+  const original = fs.promises.stat;
+  let published: ReturnType<typeof captureAuthProfileFileIdentity> | undefined;
+  const stat = vi.spyOn(fs.promises, "stat").mockImplementationOnce((...args) => {
+    fs.writeFileSync(databasePath, "created synthetic database");
+    noteAuthProfileFileWrite(databasePath);
+    published = captureAuthProfileFileIdentity(databasePath);
+    return original(...args);
+  });
+  syncBuiltinESMExports();
+  try {
+    await refreshAuthProfileFileState();
+    expect(published?.identity?.key).toMatch(/^file:/);
+    expect(() => published!.assertCurrent()).not.toThrow();
+  } finally {
+    stat.mockRestore();
+    syncBuiltinESMExports();
+  }
 });
 
 it("explicitly refreshes absent files without retiring unchanged authority", async () => {
@@ -104,7 +128,7 @@ it("explicitly refreshes absent files without retiring unchanged authority", asy
   expect(captured.identity?.key).toMatch(/^file:/);
   expect(authProfileSourceExists(legacyPath)).toBe(true);
   await Promise.all([refreshAuthProfileFileState(), refreshAuthProfileFileState()]);
-  expect(captured.assertCurrent).not.toThrow();
+  expect(() => captured.assertCurrent()).not.toThrow();
 });
 
 it("invalidates admitted auth facts after a separate process replaces their files", async () => {
@@ -132,7 +156,7 @@ it("invalidates admitted auth facts after a separate process replaces their file
   ]);
   await vi.advanceTimersByTimeAsync(30_000);
   await changed;
-  expect(captured.assertCurrent).toThrow("database file identity changed");
+  expect(() => captured.assertCurrent()).toThrow("database file identity changed");
   expect(readAuthProfileDatabaseIdentity(databasePath)?.key).not.toBe(before?.key);
   expect(authProfileSourceExists(legacyPath)).toBe(true);
   const stat = vi.spyOn(fs, "statSync");
@@ -181,7 +205,7 @@ it("keeps an absent database readable as missing after fallback revalidation", a
   await vi.advanceTimersByTimeAsync(30_000);
   await changed;
   expect(readAuthProfileDatabaseIdentity(databasePath)).toEqual(captured.identity);
-  expect(captured.assertCurrent).not.toThrow();
+  expect(() => captured.assertCurrent()).not.toThrow();
 });
 
 it("retires observations with the database owner", async () => {
@@ -194,6 +218,6 @@ it("retires observations with the database owner", async () => {
     candidates: [{ path: databasePath }],
     deleted: false,
   });
-  expect(captured.assertCurrent).toThrow("database file identity changed");
+  expect(() => captured.assertCurrent()).toThrow("database file identity changed");
   expect(captureAuthProfileFileIdentity(databasePath).assertCurrent).not.toThrow();
 });

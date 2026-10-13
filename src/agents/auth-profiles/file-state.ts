@@ -15,6 +15,7 @@ import { registerListener } from "../../shared/listeners.js";
 import { isArtifactPreservingStateRead } from "../../state/artifact-preserving-state-reads.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "../../state/openclaw-state-db-cache.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-maintenance-context.js";
+import { waitForAuthProfileNativePublications } from "./store-update-commit.js";
 
 type FileChange = { directory: string; identityChanged: boolean; sourcesChanged: boolean };
 type DirectoryState = {
@@ -27,7 +28,8 @@ type DirectoryState = {
 };
 
 const directories = new Map<string, DirectoryState>();
-const listeners = new Set<(change: FileChange) => void>();
+type FileChangeListener = (change: FileChange) => void | Promise<void>;
+const listeners = new Set<FileChangeListener>();
 const legacyNames = new Set(["auth-profiles.json", "auth-state.json", "auth.json", "oauth.json"]);
 
 function retireDirectory(directory: string, state: DirectoryState): void {
@@ -53,57 +55,70 @@ registerAgentDatabaseReaderCloser((candidates, retainedPaths) => {
 
 function refreshDirectory(directory: string, state: DirectoryState): Promise<void> {
   state.dirty = true;
-  state.refresh ??= (async () => {
-    while (state.dirty && directories.get(directory) === state) {
-      state.dirty = false;
-      let identityChanged = false;
-      let sourcesChanged = false;
-      for (const [databasePath, previous] of state.identities) {
-        const current = await stat(databasePath, { bigint: true })
-          .then((file) =>
-            file.isFile() &&
-            previous?.key === `file:${databaseFileIdentityKey(file)}` &&
-            previous.birthtime === readDatabaseIdentityBirthtime(file)
-              ? previous
-              : readDatabasePathIdentity(databasePath),
-          )
-          .catch((error: unknown) =>
-            hasErrnoCode(error, "ENOENT") ? readDatabasePathIdentity(databasePath) : undefined,
-          );
-        if (directories.get(directory) !== state) {
-          return;
-        }
-        if (current?.key !== previous?.key || current?.birthtime !== previous?.birthtime) {
-          identityChanged = true;
-          state.identities.set(databasePath, current);
-        }
-      }
-      for (const [sourcePath, previous] of state.presence) {
-        const current = await stat(sourcePath).then(
-          () => true,
-          () => false,
+  state.refresh ??= Promise.resolve().then(async () => {
+    try {
+      while (state.dirty && directories.get(directory) === state) {
+        state.dirty = false;
+        await waitForAuthProfileNativePublications(
+          Array.from(state.identities.values()).flatMap((identity) =>
+            identity ? [identity.canonicalPath] : [],
+          ),
         );
         if (directories.get(directory) !== state) {
           return;
         }
-        if (current !== previous) {
-          sourcesChanged = true;
-          state.presence.set(sourcePath, current);
+        let identityChanged = false;
+        let sourcesChanged = false;
+        for (const [databasePath, previous] of state.identities) {
+          const current = await stat(databasePath, { bigint: true })
+            .then((file) =>
+              file.isFile() &&
+              previous?.key === `file:${databaseFileIdentityKey(file)}` &&
+              previous.birthtime === readDatabaseIdentityBirthtime(file)
+                ? previous
+                : readDatabasePathIdentity(databasePath),
+            )
+            .catch((error: unknown) =>
+              hasErrnoCode(error, "ENOENT") ? readDatabasePathIdentity(databasePath) : undefined,
+            );
+          if (directories.get(directory) !== state) {
+            return;
+          }
+          if (state.identities.get(databasePath) !== previous) {
+            state.dirty = true;
+            continue;
+          }
+          if (current?.key !== previous?.key || current?.birthtime !== previous?.birthtime) {
+            identityChanged = true;
+            state.identities.set(databasePath, current);
+          }
+        }
+        for (const [sourcePath, previous] of state.presence) {
+          const current = await stat(sourcePath).then(
+            () => true,
+            () => false,
+          );
+          if (directories.get(directory) !== state) {
+            return;
+          }
+          if (current !== previous) {
+            sourcesChanged = true;
+            state.presence.set(sourcePath, current);
+          }
+        }
+        if (identityChanged) {
+          state.revision += 1;
+        }
+        if (state.identities.size || sourcesChanged) {
+          await Promise.all(
+            Array.from(listeners, (listener) =>
+              listener({ directory, identityChanged, sourcesChanged }),
+            ),
+          );
         }
       }
-      if (identityChanged) {
-        state.revision += 1;
-      }
-      if (state.identities.size || sourcesChanged) {
-        for (const listener of listeners) {
-          listener({ directory, identityChanged, sourcesChanged });
-        }
-      }
-    }
-  })().finally(() => {
-    state.refresh = undefined;
-    if (state.dirty && directories.get(directory) === state) {
-      return refreshDirectory(directory, state);
+    } finally {
+      state.refresh = undefined;
     }
   });
   return state.refresh;
@@ -195,7 +210,7 @@ export function authProfileSourceExists(sourcePath: string): boolean {
   return state.presence.get(sourcePath)!;
 }
 
-export function registerAuthProfileFileChangeListener(listener: (change: FileChange) => void) {
+export function registerAuthProfileFileChangeListener(listener: FileChangeListener) {
   return registerListener(listeners, listener);
 }
 

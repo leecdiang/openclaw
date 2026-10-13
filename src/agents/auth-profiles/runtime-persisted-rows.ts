@@ -6,7 +6,14 @@ import {
 } from "../../infra/agent-database-readers.js";
 import { readSqliteDatabaseScopedWriteTokenForPath } from "../../infra/sqlite-database-admission.js";
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
-import type { AuthProfileRowRead } from "./types.js";
+import { AUTH_STORE_VERSION } from "./constants.js";
+import {
+  buildPersistedAuthProfileSecretsStore,
+  mergePersistedAuthProfileState,
+} from "./persisted.js";
+import { buildPersistedAuthProfileState } from "./state.js";
+import { AuthProfileStoreUnreadableError } from "./store-unreadable-error.js";
+import type { AuthProfileRowRead, AuthProfileStore } from "./types.js";
 
 type RowsReader = {
   identity?: string;
@@ -14,14 +21,34 @@ type RowsReader = {
   assertCurrent: () => void;
 };
 
+function persistedSource(store: AuthProfileStore | null): AuthProfileStore {
+  const current = store ?? { version: AUTH_STORE_VERSION, profiles: {} };
+  return {
+    ...buildPersistedAuthProfileSecretsStore(current),
+    ...buildPersistedAuthProfileState(current),
+  };
+}
+
+function sourceFromRows(rows: AuthProfileRowRead, databasePath: string): AuthProfileStore {
+  const store = mergePersistedAuthProfileState(
+    rows.store.status === "readable" ? rows.store.raw : null,
+    () => (rows.state.status === "readable" ? rows.state.raw : null),
+  );
+  if (!store && rows.store.status !== "missing") {
+    throw new AuthProfileStoreUnreadableError(databasePath);
+  }
+  return persistedSource(store);
+}
+
 /** A derived rows cache; the runtime snapshot owner supplies publication generations. */
 export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string) => string) {
   type Refresh = () => Promise<AuthProfileRowRead>;
   type Entry = {
     identity: string | undefined;
-    writeToken: string;
+    writeToken: string | undefined;
     revision: string;
-    rows: AuthProfileRowRead;
+    source: AuthProfileStore;
+    rows?: AuthProfileRowRead;
     refresh?: Refresh;
   };
   const entries = new Map<string, Entry>();
@@ -32,6 +59,39 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
   const isCurrent = (databasePath: string, entry: Entry) =>
     entries.get(databasePath) === entry && hasCurrentSource(databasePath, entry);
   return {
+    recordSource(
+      databasePath: string,
+      identity: string,
+      store: AuthProfileStore | null,
+      refresh: Refresh,
+    ) {
+      const writeToken = readSqliteDatabaseScopedWriteTokenForPath(databasePath, "auth-profiles");
+      const source = freezeJsonSnapshot(structuredClone(persistedSource(store)));
+      const previous = entries.get(databasePath);
+      entries.set(databasePath, {
+        identity,
+        writeToken,
+        revision: revisionAtPath(databasePath),
+        source,
+        refresh,
+        ...(previous?.identity === identity &&
+        previous.writeToken === writeToken &&
+        isDeepStrictEqual(previous.source, source)
+          ? { rows: previous.rows }
+          : {}),
+      });
+      const active = refreshing.get(path.dirname(path.resolve(databasePath)));
+      if (active) {
+        active.pending = true;
+      }
+    },
+    invalidateRows(databasePath?: string) {
+      for (const [pathname, entry] of entries) {
+        if (databasePath === undefined || pathname === databasePath) {
+          entry.rows = undefined;
+        }
+      }
+    },
     clear(databasePath?: string) {
       if (databasePath === undefined) {
         entries.clear();
@@ -56,20 +116,27 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
         if (!databasePaths.has(databasePath)) {
           entries.delete(databasePath);
         } else if (
+          entry.writeToken === undefined ||
           readSqliteDatabaseScopedWriteTokenForPath(databasePath, "auth-profiles") ===
-          entry.writeToken
+            entry.writeToken
         ) {
           entry.revision = revisionAtPath(databasePath);
         }
       }
     },
-    refreshChanged(directory: string, requiredPaths: readonly string[] = []): Promise<string[]> {
+    rebase(databasePath: string) {
+      const entry = entries.get(databasePath);
+      if (
+        entry &&
+        (entry.writeToken === undefined ||
+          readSqliteDatabaseScopedWriteTokenForPath(databasePath, "auth-profiles") ===
+            entry.writeToken)
+      ) {
+        entry.revision = revisionAtPath(databasePath);
+      }
+    },
+    refreshChanged(directory: string): Promise<string[]> {
       const key = path.resolve(directory);
-      const required = new Map(
-        requiredPaths
-          .filter((databasePath) => path.dirname(path.resolve(databasePath)) === key)
-          .map((databasePath) => [databasePath, revisionAtPath(databasePath)]),
-      );
       const active = refreshing.get(key);
       if (active) {
         active.pending = true;
@@ -81,25 +148,60 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
         try {
           while (operation.pending) {
             operation.pending = false;
-            for (const [databasePath, entry] of [...entries]) {
+            // Async reads must not visit owners installed during this observation.
+            const observedEntries = Array.from(entries);
+            for (const [databasePath, entry] of observedEntries) {
               if (path.dirname(path.resolve(databasePath)) !== key || !entry.refresh) {
                 continue;
               }
+              // Native source publication can precede the first scoped SQLite admission.
+              entry.writeToken ??= readSqliteDatabaseScopedWriteTokenForPath(
+                databasePath,
+                "auth-profiles",
+              );
               if (!isCurrent(databasePath, entry)) {
                 continue;
               }
+              const writeToken = entry.writeToken;
               let rows: AuthProfileRowRead | undefined;
+              let source: AuthProfileStore | undefined;
               try {
                 rows = await entry.refresh();
+                source = sourceFromRows(rows, databasePath);
               } catch {
                 // A failed external reread cannot certify the cached credential facts.
               }
+              if (
+                entries.get(databasePath) === entry &&
+                revisionAtPath(databasePath) === entry.revision &&
+                writeToken === undefined
+              ) {
+                entry.writeToken = readSqliteDatabaseScopedWriteTokenForPath(
+                  databasePath,
+                  "auth-profiles",
+                );
+                if (entry.writeToken !== undefined) {
+                  operation.pending = true;
+                  continue;
+                }
+              }
               if (!isCurrent(databasePath, entry)) {
                 continue;
               }
-              if (!rows?.cacheable || !isDeepStrictEqual(rows, entry.rows)) {
+              if (
+                !rows?.cacheable ||
+                source === undefined ||
+                rows.store.status === "unreadable" ||
+                rows.state.status === "unreadable" ||
+                !isDeepStrictEqual(source, entry.source)
+              ) {
                 entries.delete(databasePath);
                 changed.set(databasePath, entry);
+              } else {
+                freezeJsonSnapshot(rows);
+                if (entry.writeToken !== undefined) {
+                  entry.rows ??= rows;
+                }
               }
             }
           }
@@ -108,16 +210,7 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
               ? [databasePath]
               : [],
           );
-          for (const [databasePath, revision] of required) {
-            const entry = entries.get(databasePath);
-            if (
-              revisionAtPath(databasePath) === revision &&
-              (!entry?.refresh || !isCurrent(databasePath, entry))
-            ) {
-              result.push(databasePath);
-            }
-          }
-          return [...new Set(result)];
+          return result;
         } finally {
           refreshing.delete(key);
         }
@@ -142,13 +235,16 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
             writeToken !== undefined &&
             entry?.identity === reader.identity &&
             entry?.revision === revision &&
-            entry.writeToken === writeToken
+            entry.writeToken === writeToken &&
+            entry.rows
           ) {
             entry.refresh = refresh ?? entry.refresh;
             return entry.rows;
           }
-          entries.delete(databasePath);
-          // Only completed, certified reads can serve another caller's later snapshot.
+          if (entry) {
+            entry.rows = undefined;
+          }
+          // Source provenance can precede admission; reusable rows require a stable receipt.
           const rows = await reader.read();
           reader.assertCurrent();
           if (
@@ -156,15 +252,17 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
             rows.store.status !== "unreadable" &&
             rows.state.status !== "unreadable" &&
             revisionAtPath(databasePath) === revision &&
-            writeToken !== undefined &&
-            readSqliteDatabaseScopedWriteTokenForPath(databasePath, "auth-profiles") === writeToken
+            (writeToken === undefined ||
+              readSqliteDatabaseScopedWriteTokenForPath(databasePath, "auth-profiles") ===
+                writeToken)
           ) {
             freezeJsonSnapshot(rows);
             entries.set(databasePath, {
               identity: reader.identity,
               writeToken,
               revision,
-              rows,
+              ...(writeToken === undefined ? {} : { rows }),
+              source: sourceFromRows(rows, databasePath),
               refresh,
             });
           }

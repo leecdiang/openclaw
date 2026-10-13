@@ -330,7 +330,7 @@ async function prepareSourceRequest(
   observe: (pathname: string) => void,
 ): Promise<GatewaySessionStoreSourceRequest | undefined> {
   const paths = createOpenClawAgentDatabasePathMatcher();
-  memo.pathsCurrent = paths.isCurrent;
+  memo.pathsCurrent = () => paths.isCurrent();
   paths(params.registryPath, params.registryPath);
   observe(params.registryPath);
   const inventory = prepareSessionStoreTargetInventory(
@@ -369,9 +369,9 @@ async function prepareSourceRequest(
   const original = registry.result;
   const registeredDatabases =
     original.status === "available"
-      ? original.entries.map(({ agentId, path, schemaVersion }) => ({
+      ? original.entries.map(({ agentId, path: databasePath, schemaVersion }) => ({
           agentId,
-          path,
+          path: databasePath,
           schemaVersion,
         }))
       : undefined;

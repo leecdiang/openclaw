@@ -3,14 +3,19 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import { refreshAuthProfileFileState } from "../agents/auth-profiles/file-state.js";
+import { resolveSharedAuthStoreOwnership } from "../agents/auth-profiles/path-resolve.js";
 import {
+  getRuntimeAuthProfileStoreCredentialsRevision,
   getRuntimeAuthProfileStoreSnapshotCore,
   refreshRuntimeAuthProfileStoreSources,
   registerRuntimeAuthProfileStoreMutationListener,
+  setRuntimeAuthProfileStoreSnapshot,
 } from "../agents/auth-profiles/runtime-snapshots.js";
 import { resolveAuthProfileDatabasePath } from "../agents/auth-profiles/sqlite.js";
 import {
   loadAuthProfileStoreForRuntimeAsync,
+  loadAuthProfileStoreWithoutExternalProfiles,
   saveAuthProfileStore,
 } from "../agents/auth-profiles/store-runtime.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
@@ -41,6 +46,60 @@ afterEach(async () => {
   await closeOpenClawStateDatabaseAsync();
   vi.unstubAllEnvs();
 });
+
+it.each(["native commit", "cold async read"] as const)(
+  "retains a %s through observation and detects a later foreign edit",
+  async (initial) => {
+    const root = temporary.make("auth-own-write-observation-");
+    const agentDir = path.join(root, "agents", "main", "agent");
+    vi.stubEnv("OPENCLAW_STATE_DIR", root);
+    const store = (key: string) => ({
+      version: 1,
+      profiles: { example: { type: "api_key" as const, provider: "openai", key } },
+    });
+    if (initial === "native commit") {
+      const options = { filterExternalAuthProfiles: false, syncExternalCli: false };
+      saveAuthProfileStore(store("before"), agentDir, options);
+      setRuntimeAuthProfileStoreSnapshot(
+        loadAuthProfileStoreWithoutExternalProfiles(agentDir),
+        agentDir,
+      );
+      saveAuthProfileStore(store("owned"), agentDir, options);
+      const revision = getRuntimeAuthProfileStoreCredentialsRevision();
+
+      await refreshAuthProfileFileState();
+
+      expect(getRuntimeAuthProfileStoreCredentialsRevision()).toBe(revision);
+    } else {
+      await promisify(execFile)(process.execPath, [
+        "-e",
+        'const fs = require("node:fs"); const path = require("node:path"); const { DatabaseSync } = require("node:sqlite"); fs.mkdirSync(path.dirname(process.argv[1]), { recursive: true }); const db = new DatabaseSync(process.argv[1]); try { db.exec("CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT); CREATE TABLE auth_profile_state (state_key TEXT PRIMARY KEY, state_json TEXT)"); db.prepare("INSERT INTO auth_profile_store VALUES (?, ?)").run("primary", process.argv[2]); } finally { db.close(); }',
+        resolveAuthProfileDatabasePath(agentDir),
+        JSON.stringify(store("owned")),
+      ]);
+      resolveSharedAuthStoreOwnership();
+      setRuntimeAuthProfileStoreSnapshot(
+        await loadAuthProfileStoreForRuntimeAsync(agentDir, {
+          readOnly: true,
+          externalCli: { mode: "none" },
+        }),
+        agentDir,
+      );
+    }
+    expect(getRuntimeAuthProfileStoreSnapshotCore(agentDir)?.profiles.example).toMatchObject({
+      key: "owned",
+    });
+    await promisify(execFile)(process.execPath, [
+      "-e",
+      'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); try { db.prepare("UPDATE auth_profile_store SET store_json = ? WHERE store_key = ?").run(process.argv[2], "primary"); } finally { db.close(); }',
+      resolveAuthProfileDatabasePath(agentDir),
+      JSON.stringify(store("foreign")),
+    ]);
+    await refreshAuthProfileFileState();
+
+    expect(getRuntimeAuthProfileStoreSnapshotCore(agentDir)).toBeUndefined();
+  },
+);
 
 it.each(["observation", "explicit refresh"] as const)(
   "publishes a separate process's auth edit through %s",

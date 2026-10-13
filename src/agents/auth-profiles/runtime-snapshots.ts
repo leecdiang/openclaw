@@ -4,8 +4,12 @@ import path from "node:path";
  * Snapshots are cloned at boundaries so callers cannot mutate shared state.
  */
 import { isDeepStrictEqual } from "node:util";
+import { cloneEnvWithPlatformSemantics } from "../../config/config-env-vars.js";
+import { resolveStateDir } from "../../config/paths.js";
 import { registerAgentDatabaseReaderCloser } from "../../infra/agent-database-readers.js";
 import { registerListener } from "../../shared/listeners.js";
+import { isArtifactPreservingStateRead } from "../../state/artifact-preserving-state-reads.js";
+import { getOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-maintenance-context.js";
 import { cloneAuthProfileStore } from "./clone.js";
 import { reportCommittedInlineAuthFailure } from "./constants.js";
 import {
@@ -54,6 +58,7 @@ import {
   type SharedAuthProfileStoreMutation,
 } from "./runtime-snapshot-selection.js";
 import { registerFreshSharedAuthStoreHandoff } from "./shared-store-bootstrap.js";
+import { readAuthProfileRowsAtPath } from "./sqlite-read.js";
 import { closeAuthProfileReadPool } from "./sqlite.js";
 import type {
   AuthProfileStore,
@@ -97,10 +102,33 @@ export const runtimeAuthProfileRowsCache = createRuntimeAuthProfileRowsCache(
     `${getRuntimeAuthProfileStoreSnapshotRevisionAtDatabasePath(databasePath)}:${getRuntimeAuthProfileStoreMutationRevisionAtDatabasePath(databasePath)}`,
 );
 
+/** Only canonical reads and committed local stores establish file-backed source provenance. */
+export function recordRuntimeAuthProfilePersistedStore(
+  databasePath: string,
+  store: AuthProfileStore | null,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (isArtifactPreservingStateRead() || getOpenClawDatabaseMaintenanceScope()) {
+    return;
+  }
+  const identity = readAuthProfileDatabaseIdentity(databasePath);
+  if (!identity?.key.startsWith("file:")) {
+    return;
+  }
+  const capturedEnv = cloneEnvWithPlatformSemantics(env);
+  capturedEnv.OPENCLAW_STATE_DIR = resolveStateDir(capturedEnv);
+  runtimeAuthProfileRowsCache.recordSource(
+    databasePath,
+    `${identity.key}:${identity.birthtime ?? ""}`,
+    store,
+    () => readAuthProfileRowsAtPath(databasePath, capturedEnv),
+  );
+}
+
 /** User-requested refresh reads persisted sources even before observation delivers a change. */
 export async function refreshRuntimeAuthProfileStoreSources(): Promise<void> {
   await refreshAuthProfileFileState();
-  runtimeAuthProfileRowsCache.clear();
+  runtimeAuthProfileRowsCache.invalidateRows();
 }
 
 registerAgentDatabaseReaderCloser((candidates, retainedPaths) => {
@@ -145,7 +173,10 @@ function refreshExternalAuthPaths(paths: readonly string[]): void {
   }
   externalRefresh = (async () => {
     const revision = externalRefreshRevision;
-    while (revision === externalRefreshRevision && externalChanges.size) {
+    while (externalChanges.size) {
+      if (revision !== externalRefreshRevision) {
+        break;
+      }
       const pending = [...externalChanges];
       externalChanges.clear();
       try {
@@ -167,16 +198,6 @@ function refreshExternalAuthPaths(paths: readonly string[]): void {
 }
 
 registerAuthProfileFileChangeListener(({ directory, identityChanged, sourcesChanged }) => {
-  const required = [
-    ...new Set(
-      [...runtimeAuthStoreSnapshots].flatMap(([key, entry]) => [
-        key,
-        ...(entry.owner.kind === "resolved" ? [entry.owner.sharedDatabasePath] : []),
-      ]),
-    ),
-  ].filter(
-    (databasePath) => !readAuthProfileDatabaseIdentity(databasePath)?.key.startsWith("path:"),
-  );
   if (identityChanged || sourcesChanged) {
     const paths = [...runtimeAuthStoreSnapshots].flatMap(([key, entry]) => {
       const candidates = entry.legacyCandidates;
@@ -195,8 +216,8 @@ registerAuthProfileFileChangeListener(({ directory, identityChanged, sourcesChan
     refreshExternalAuthPaths(paths);
   }
   // Session writes share these files; only changed auth rows invalidate published credentials.
-  void runtimeAuthProfileRowsCache
-    .refreshChanged(directory, required)
+  return runtimeAuthProfileRowsCache
+    .refreshChanged(directory)
     .then(refreshExternalAuthPaths)
     .catch((error: unknown) => {
       reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
@@ -572,12 +593,13 @@ export function clearRuntimeAuthProfileStoreSnapshotAtDatabasePath(
   key: string,
   agentDir?: string,
 ): boolean {
-  runtimeAuthProfileRowsCache.clear(key);
+  runtimeAuthProfileRowsCache.invalidateRows(key);
   const store = runtimeAuthStoreSnapshots.get(key)?.store;
   if (!store) {
     advanceRuntimeAuthStoreMetadataRevision(key);
     advanceRuntimeAuthStoreSnapshotsRevision();
     recordDeletedSnapshotRevision(key);
+    runtimeAuthProfileRowsCache.rebase(key);
     return false;
   }
   if (Object.keys(store.profiles).length > 0) {
@@ -588,6 +610,7 @@ export function clearRuntimeAuthProfileStoreSnapshotAtDatabasePath(
   runtimeAuthStoreSnapshots.delete(key);
   clearRuntimeAuthMaterializationsAtDatabasePath(key);
   recordDeletedSnapshotRevision(key);
+  runtimeAuthProfileRowsCache.rebase(key);
   notifyRuntimeAuthStoreMutation(agentDir, Object.keys(store.profiles).length > 0);
   return true;
 }
@@ -623,6 +646,7 @@ function setRuntimeAuthProfileStoreSnapshotAtKey(
     owner,
     legacyCandidates,
   });
+  runtimeAuthProfileRowsCache.rebase(key);
   if (changedMetadata) {
     notifyRuntimeAuthStoreMutation(agentDir, profileSetChanged);
   }
@@ -716,6 +740,7 @@ export function noteRuntimeAuthProfileStorePersistedMutation(
   mutation: SharedAuthProfileStoreMutation,
   owner?: AuthProfileStoreOwner,
   prepared?: ReadonlyMap<string, OwnedRuntimeSnapshot>,
+  persisted?: { store: AuthProfileStore | null; env: NodeJS.ProcessEnv },
 ): number {
   const ownerKey = owner?.databasePath ?? resolveRuntimeStoreKey(agentDir);
   noteAuthProfileFileWrite(ownerKey);
@@ -726,7 +751,7 @@ export function noteRuntimeAuthProfileStorePersistedMutation(
   if (mutation.credentialsChanged) {
     runtimeAuthStoreCredentialsRevision += 1;
   }
-  runtimeAuthProfileRowsCache.clear(ownerKey);
+  runtimeAuthProfileRowsCache.invalidateRows(ownerKey);
   if (mutation.selectionChanged) {
     advanceRuntimeAuthStoreMetadataRevision(ownerKey);
   }
@@ -737,6 +762,11 @@ export function noteRuntimeAuthProfileStorePersistedMutation(
     ...mutation,
     profileIds: changedProfileIds,
   });
+  if (persisted) {
+    recordRuntimeAuthProfilePersistedStore(ownerKey, persisted.store, persisted.env);
+  } else {
+    runtimeAuthProfileRowsCache.rebase(ownerKey);
+  }
   const revision = getRuntimeAuthProfileStoreMutationRevisionAtDatabasePath(ownerKey);
   const mainKey = owner?.sharedDatabasePath ?? resolveRuntimeStoreKey(undefined);
   if (ownerKey === mainKey && (mutation.credentialsChanged || mutation.profileSetChanged)) {
@@ -768,7 +798,7 @@ export function noteRuntimeAuthProfileStorePersistedMutation(
 
 /** Install one committed shared generation before listeners can observe any affected owner. */
 export function publishRuntimeAuthProfileSharedCredentialMutation(
-  owner: AuthProfileStoreOwner,
+  owner: PreparedAuthProfileStoreOwner,
   committedStore: AuthProfileStore,
   mutation: Parameters<typeof noteRuntimeAuthProfileStorePersistedMutation>[1],
 ) {
@@ -798,6 +828,7 @@ export function publishRuntimeAuthProfileSharedCredentialMutation(
       { ...mutation, profileIds },
       owner,
       prepared,
+      { store: committedStore, env: owner.env },
     );
     for (const [key, entry] of prepared) {
       setRuntimeAuthProfileStoreSnapshotAtKey(

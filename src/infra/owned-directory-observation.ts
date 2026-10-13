@@ -26,7 +26,8 @@ function detach(directory: Directory) {
 }
 
 function notify(directory: Directory, filename?: string) {
-  for (const listener of [...directory.listeners]) {
+  const listeners = Array.from(directory.listeners);
+  for (const listener of listeners) {
     listener(filename);
   }
 }
@@ -57,7 +58,7 @@ function attach(directory: Directory) {
           // A renamed directory's watcher can remain bound to its retired inode.
           // Child-file renames do not retire the directory or its queued events.
           if (event === "rename") {
-            const renamedRoot = !filename || filename.toString() === path.basename(candidate);
+            const renamedRoot = !filename || filename === path.basename(candidate);
             const readmit = affected.filter((entry) => renamedRoot || entry.path !== candidate);
             for (const entry of readmit) {
               detach(entry);

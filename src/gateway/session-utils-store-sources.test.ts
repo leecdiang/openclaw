@@ -369,7 +369,7 @@ it("retains source preparation until directory or registry ownership changes", a
       await Promise.resolve();
       fs.unlinkSync(alias);
       fs.symlinkSync(replacement, alias, process.platform === "win32" ? "junction" : "dir");
-      for (const entry of [...observedDirectories]) {
+      for (const entry of observedDirectories) {
         if (entry.active && entry.directory === path.dirname(alias)) {
           entry.notify(path.basename(alias));
         }

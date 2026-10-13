@@ -117,17 +117,42 @@ describe("canonical proof on physical database validation", () => {
         syncBuiltinESMExports();
       }
       closeOpenClawAgentDatabaseByPath(database.path);
+      expect(
+        observedValidationDirectories.some(
+          (observer) => observer.active && observer.directory === path.dirname(database.path),
+        ),
+      ).toBe(false);
+      expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
+        captured?.validation.receiptId,
+      );
       const replacement = `${database.path}.replacement`;
       fs.copyFileSync(database.path, replacement);
       fs.renameSync(replacement, database.path);
       expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(1);
-      for (const observer of [...observedValidationDirectories]) {
+      for (const observer of observedValidationDirectories) {
         if (observer.active && observer.directory === path.dirname(database.path)) {
           observer.notify(path.basename(database.path));
         }
       }
-      expect(captured!.assertCurrent).toThrow("Session reader validation is no longer current");
+      expect(() => captured!.assertCurrent()).toThrow(
+        "Session reader validation is no longer current",
+      );
       expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(0);
+    });
+  });
+
+  it("rechecks a retained receipt when its closed path is read after replacement", async () => {
+    await withReceiptFixture(false, (database) => {
+      const captured = captureOpenClawAgentDatabaseReadValidation(database)!;
+      closeOpenClawAgentDatabaseByPath(database.path);
+      const replacement = `${database.path}.replacement`;
+      fs.copyFileSync(database.path, replacement);
+      fs.renameSync(replacement, database.path);
+      expect(Atomics.load(new Int32Array(captured.validation.valid), 0)).toBe(1);
+      expect(captureOpenClawAgentDatabaseReadValidation(database)).toBeUndefined();
+      expect(() => captured.assertCurrent()).toThrow(
+        "Session reader validation is no longer current",
+      );
     });
   });
 

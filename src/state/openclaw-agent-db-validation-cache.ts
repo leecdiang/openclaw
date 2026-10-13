@@ -41,6 +41,7 @@ import {
 } from "./openclaw-agent-db-identity.js";
 import {
   matchesAgentDatabaseReadCandidatePath,
+  registerOpenClawAgentDatabaseSyncResource,
   type OpenClawAgentDatabaseReadCandidateResource,
 } from "./openclaw-agent-db-resources.js";
 import {
@@ -74,10 +75,9 @@ const validationObservations = resolveGlobalSingleton<Map<string, { close(): voi
 
 function releaseValidationObservation(pathname: string): void {
   validationObservations.get(pathname)?.close();
-  validationObservations.delete(pathname);
 }
 
-function observeValidationPath(pathname: string): void {
+function observeValidationPath(pathname: string, agentId: string): void {
   if (validationObservations.has(pathname)) {
     return;
   }
@@ -92,19 +92,43 @@ function observeValidationPath(pathname: string): void {
       invalidateOpenClawAgentDatabaseValidation(pathname, validation.identity);
     }
   };
-  validationObservations.set(
-    pathname,
-    observeOwnedDirectory(path.dirname(pathname), (filename) => {
-      if (
-        filename === undefined ||
-        (process.platform === "win32"
-          ? filename.toLowerCase() === path.basename(pathname).toLowerCase()
-          : filename === path.basename(pathname))
-      ) {
-        revalidate();
+  const watched = observeOwnedDirectory(path.dirname(pathname), (filename) => {
+    if (
+      filename === undefined ||
+      (process.platform === "win32"
+        ? filename.toLowerCase() === path.basename(pathname).toLowerCase()
+        : filename === path.basename(pathname))
+    ) {
+      revalidate();
+    }
+  });
+  let active = true;
+  let unregister = () => {};
+  const observation = {
+    close() {
+      if (!active) {
+        return;
       }
-    }),
-  );
+      active = false;
+      watched.close();
+      unregister();
+      if (validationObservations.get(pathname) === observation) {
+        validationObservations.delete(pathname);
+      }
+    },
+  };
+  validationObservations.set(pathname, observation);
+  try {
+    unregister = registerOpenClawAgentDatabaseSyncResource({
+      agentId,
+      path: pathname,
+      revoke: () => observation.close(),
+      close: () => observation.close(),
+    });
+  } catch (error) {
+    observation.close();
+    throw error;
+  }
   // The first subscriber must not retain a file replaced before observation began.
   revalidate();
 }
@@ -312,7 +336,7 @@ export function captureOpenClawAgentDatabaseReadValidation(
   }
   let canonicalPath = database.path;
   if (validatedPaths.has(canonicalPath)) {
-    observeValidationPath(canonicalPath);
+    observeValidationPath(canonicalPath, current.agentId);
     if (Atomics.load(new Int32Array(current.valid), 0) !== 1) {
       return undefined;
     }

@@ -22,7 +22,9 @@ import {
   type PersonalCatalogSelection,
 } from "../../state/user-model-accounts.js";
 import { captureAuthProfileFileIdentity } from "./file-state.js";
+import { withAuthProfileCleanup } from "./operation-cleanup.js";
 import { mergePersistedAuthProfileState } from "./persisted.js";
+import { resolveAuthProfileDatabaseOwnerId } from "./sqlite.js";
 import { AuthProfileStoreUnreadableError } from "./store-unreadable-error.js";
 import { receiveAuthProfileUpdateValue } from "./store-update-transfer.js";
 import type {
@@ -52,6 +54,23 @@ const missing: AuthProfileRowRead = {
   state: { status: "missing", reason: "database" },
   cacheable: false,
 };
+
+/** Reopen the captured owner's current source for file observation, not a request's old reader. */
+export async function readAuthProfileRowsAtPath(
+  databasePath: string,
+  env: NodeJS.ProcessEnv,
+): Promise<AuthProfileRowRead> {
+  const context = captureOpenClawStateWorkerContext({ env });
+  if (databasePath === context.admission.databasePath) {
+    return readSharedAuthProfileRows(context);
+  }
+  const reader = prepareAgentAuthProfileRowsRead({
+    databasePath,
+    agentId: resolveAuthProfileDatabaseOwnerId(path.dirname(databasePath)),
+    env,
+  });
+  return withAuthProfileCleanup(reader.read, () => reader.dispose());
+}
 
 function isInspection(value: unknown): value is PersistedAuthProfileStoreInspection {
   return (
@@ -91,7 +110,7 @@ export function prepareAgentAuthProfileRowsRead(options: {
     }
   })();
   const uncached =
-    isArtifactPreservingStateRead() || (captured.ok && !!captured.value.maintenanceScope);
+    isArtifactPreservingStateRead() || (captured.ok && Boolean(captured.value.maintenanceScope));
   let fileState: ReturnType<typeof captureAuthProfileFileIdentity> | undefined;
   let identity: ReturnType<typeof inspectDatabasePathIdentitySync>;
   try {

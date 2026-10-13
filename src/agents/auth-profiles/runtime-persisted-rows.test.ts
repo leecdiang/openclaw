@@ -22,21 +22,107 @@ function emptyRows(): AuthProfileRowRead {
   };
 }
 
-it("refreshes published owners without a retained row baseline", async () => {
-  const databasePath = path.join(tempDirs.make("auth-row-unprepared-"), "auth.sqlite");
+it.each(["completed", "failed"] as const)(
+  "retains unadmitted source provenance through a %s uncached read",
+  async (outcome) => {
+    const databasePath = path.join(tempDirs.make("auth-unadmitted-source-"), "auth.sqlite");
+    let revision = "1";
+    const cache = createRuntimeAuthProfileRowsCache(() => revision);
+    const refresh = vi.fn(async () => ({
+      ...emptyRows(),
+      state: { status: "readable" as const, raw: { lastGood: { example: "foreign" } } },
+    }));
+    cache.recordSource(databasePath, "fixture", { version: 1, profiles: {} }, refresh);
+    revision = "2";
+    cache.rebase(databasePath);
+    const read = vi.fn(async () => {
+      if (outcome === "failed") {
+        throw new Error("Source unavailable");
+      }
+      return emptyRows();
+    });
+    const resolve = () =>
+      cache
+        .prepare(databasePath, { identity: "fixture", read, assertCurrent() {} }, refresh)
+        .read();
+    if (outcome === "failed") {
+      await expect(resolve()).rejects.toThrow("Source unavailable");
+    } else {
+      const first = await resolve();
+      expect(await resolve()).not.toBe(first);
+      expect(read).toHaveBeenCalledTimes(2);
+    }
+
+    expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+    expect(refresh).toHaveBeenCalledOnce();
+  },
+);
+
+it("rereads unadmitted source when SQLite admission appears during observation", async () => {
+  const databasePath = path.join(tempDirs.make("auth-source-admission-"), "auth.sqlite");
   const cache = createRuntimeAuthProfileRowsCache(() => "1");
-  expect(await cache.refreshChanged(path.dirname(databasePath), [databasePath])).toEqual([
-    databasePath,
-  ]);
+  const rows = emptyRows();
+  const pending = Promise.withResolvers<AuthProfileRowRead>();
+  const refresh = vi.fn(async () => rows).mockReturnValueOnce(pending.promise);
+  cache.recordSource(databasePath, "fixture", { version: 1, profiles: {} }, refresh);
+  const observed = cache.refreshChanged(path.dirname(databasePath));
+  await Promise.resolve();
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  pending.resolve(rows);
+
+  expect(await observed).toEqual([]);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  const read = vi.fn(async () => emptyRows());
+  expect(
+    await cache.prepare(databasePath, { identity: "fixture", read, assertCurrent() {} }).read(),
+  ).toBe(rows);
+  expect(read).not.toHaveBeenCalled();
 });
 
-it("does not refresh an unprepared owner replaced during observation", async () => {
-  const databasePath = path.join(tempDirs.make("auth-row-unprepared-retired-"), "auth.sqlite");
+it("retains the first cold read's source when that read installs SQLite admission", async () => {
+  const databasePath = path.join(tempDirs.make("auth-cold-source-admission-"), "auth.sqlite");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const pending = Promise.withResolvers<AuthProfileRowRead>();
+  const read = vi.fn(() => pending.promise);
+  const refresh = vi.fn(async () => ({
+    ...emptyRows(),
+    state: { status: "readable" as const, raw: { lastGood: { example: "foreign" } } },
+  }));
+  const first = cache
+    .prepare(databasePath, { identity: "fixture", read, assertCurrent() {} }, refresh)
+    .read();
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  pending.resolve(emptyRows());
+  await first;
+
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+  expect(read).toHaveBeenCalledOnce();
+  expect(refresh).toHaveBeenCalledOnce();
+});
+
+it("keeps committed source provenance while dropping reusable rows", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-source-publication-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
   let revision = "1";
   const cache = createRuntimeAuthProfileRowsCache(() => revision);
-  const observed = cache.refreshChanged(path.dirname(databasePath), [databasePath]);
+  const rows = emptyRows();
+  const read = vi.fn(async () => rows);
+  const refresh = vi.fn(async () => rows);
+  const resolve = () =>
+    cache.prepare(databasePath, { identity: "fixture", read, assertCurrent() {} }, refresh).read();
+  await resolve();
+  cache.recordSource(databasePath, "fixture", { version: 1, profiles: {} }, refresh);
+  cache.invalidateRows();
   revision = "2";
-  expect(await observed).toEqual([]);
+  cache.rebase(databasePath);
+
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([]);
+  expect(await resolve()).toBe(rows);
+  expect(read).toHaveBeenCalledOnce();
+  expect(refresh).toHaveBeenCalledOnce();
 });
 
 it("retains cached credentials when an observed database change leaves auth rows unchanged", async () => {
@@ -66,7 +152,7 @@ it("retains the freshly read baseline when its resolved snapshot is published", 
   await cache.prepare(databasePath, { read, assertCurrent() {} }, refresh, false).read();
   revision = "2";
   cache.publishSnapshots(new Set([databasePath]));
-  expect(await cache.refreshChanged(path.dirname(databasePath), [databasePath])).toEqual([]);
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([]);
   expect(refresh).toHaveBeenCalledOnce();
 });
 
