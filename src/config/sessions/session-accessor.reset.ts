@@ -37,6 +37,7 @@ import type { SessionColdArchive } from "./session-cold-storage-state.js";
 import { assertSessionEntryCohortScope } from "./session-entry-cohort-scope.js";
 import type { SessionEntryCreationCommit } from "./session-entry-creation.types.js";
 import type { SessionEntryCohortReader } from "./session-entry-read-runtime.types.js";
+import type { CapturedSessionEntryReadSource } from "./session-entry-read-source.types.js";
 import {
   SessionEntryLifecycleUpsertConflictError,
   SqliteSessionMutationConflictError,
@@ -153,12 +154,26 @@ async function loadReplySessionInitializationEntriesAsync(
   });
 }
 
-function captureReplySessionInitializationSource(params: ReplySessionInitializationSelection) {
+function captureReplySessionInitializationSource(
+  params: ReplySessionInitializationSelection,
+  expectedSource?: CapturedSessionEntryReadSource,
+) {
   const captured = captureLifecycleDatabaseScope(resolveSqliteScope(params));
   const source = supportsOpenClawAgentDatabaseExecution(toDatabaseOptions(captured))
     ? readDatabasePathIdentitySync(captured.path)
     : undefined;
   const database = { ...toDatabaseOptions(captured), path: source?.canonicalPath ?? captured.path };
+  if (
+    expectedSource &&
+    (typeof expectedSource.databaseIdentity !== "string" ||
+      expectedSource.agentId !== database.agentId ||
+      (expectedSource.path !== captured.path && expectedSource.path !== database.path) ||
+      source?.key !== `file:${expectedSource.databaseIdentity}` ||
+      (expectedSource.databaseBirthtime !== undefined &&
+        source.birthtime !== expectedSource.databaseBirthtime))
+  ) {
+    throw new Error("Captured session database changed before read");
+  }
   const assertSourceCurrent = (creating = false) => {
     if (!source) {
       return;
@@ -270,6 +285,7 @@ export async function commitReplySessionInitialization(params: {
     sessionEntry: SessionEntry;
   }) => Promise<void> | void;
   expectedRevision: string;
+  expectedSource?: CapturedSessionEntryReadSource;
   maintenanceConfig?: ResolvedSessionMaintenanceConfig;
   prepareSessionEntry?: (
     context: ReplySessionInitializationCommitContext,
@@ -291,10 +307,13 @@ export async function commitReplySessionInitialization(params: {
     storePath: params.storePath,
   });
   const { captured, database, source, assertSourceCurrent } =
-    captureReplySessionInitializationSource({
-      ...params,
-      storePath,
-    });
+    captureReplySessionInitializationSource(
+      {
+        ...params,
+        storePath,
+      },
+      params.expectedSource,
+    );
   const sessionKey = normalizeStoreSessionKey(params.sessionKey);
   const needsPreparationSnapshot = Boolean(params.prepareSessionEntry || params.bindCreation);
   let store: Record<string, SessionEntry> = {};
