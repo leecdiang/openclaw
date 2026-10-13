@@ -351,7 +351,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
       )
     ) {
       this.offsetState.syncNativeOffset?.();
-      this.host.requestUpdate();
+      this.prependAnchor.scheduleReconcile(() => this.connected && this.host.requestUpdate());
     }
     if (!this.initialPositionPending || (this.contentReady && this.rowKeys.length === 0)) {
       applyPendingScrollOffset(this.scrollRestoreHost);

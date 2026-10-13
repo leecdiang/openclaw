@@ -53,9 +53,62 @@ function fixture(scrollHeight = 1600) {
 }
 
 const messages = (...ids: string[]) => new Set(ids);
-afterEach(() => document.body.replaceChildren());
+afterEach(() => {
+  document.body.replaceChildren();
+  vi.unstubAllGlobals();
+});
 
 describe("transcript prepend anchor", () => {
+  it("settles a reachable anchor when the browser ignores its scroll command", () => {
+    const { scroller, bubble, virtualizer, instance, anchor, measureRows } = fixture();
+    anchor.messageKeys = messages("visible");
+    anchor.capture(scroller, false);
+    scroller.scrollTop = 200;
+    anchor.messageKeys = messages("older", "visible");
+    anchor.capture(scroller, false);
+    bubble.getBoundingClientRect = () => rect(130, 180);
+    virtualizer.scrollToOffset.mockImplementation(() => {});
+    anchor.update(scroller, instance, measureRows);
+    anchor.update(scroller, instance, measureRows);
+    expect(anchor.messageKey).toBeNull();
+    expect(anchor.update(scroller, instance, measureRows)).toBe(false);
+    expect(scroller.scrollTop).toBe(200);
+  });
+
+  it("retains an asynchronous scroll target until the next frame commits it", () => {
+    const { scroller, bubble, virtualizer, instance, anchor, measureRows } = fixture();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+      frames.push(callback),
+    );
+    anchor.messageKeys = messages("visible");
+    anchor.capture(scroller, false);
+    scroller.scrollTop = 200;
+    anchor.messageKeys = messages("older", "visible");
+    anchor.capture(scroller, false);
+    bubble.getBoundingClientRect = () => rect(330 - scroller.scrollTop, 180);
+    virtualizer.scrollToOffset.mockImplementation((offset) => {
+      frames.push(() => {
+        scroller.scrollTop = offset;
+      });
+    });
+    const reconcile = vi.fn(() => anchor.update(scroller, instance, measureRows));
+    anchor.update(scroller, instance, measureRows);
+    anchor.scheduleReconcile(reconcile);
+    expect(anchor.messageKey).toBe("visible");
+    expect(reconcile).not.toHaveBeenCalled();
+    // Measurement notifications can commit again before WebKit applies scrolling.
+    expect(anchor.update(scroller, instance, measureRows)).toBe(false);
+    expect(anchor.messageKey).toBe("visible");
+    expect(virtualizer.scrollToOffset).toHaveBeenCalledOnce();
+    for (const frame of frames.splice(0)) {
+      frame(0);
+    }
+    expect(scroller.scrollTop).toBe(240);
+    expect(anchor.messageKey).toBeNull();
+    expect(reconcile).toHaveBeenCalledOnce();
+  });
+
   it("preserves a partially visible retained message rather than overscan across measurement and DOM replacement", () => {
     const { scroller, row, bubble, virtualizer, instance, anchor, measureRows } = fixture();
     const overscan = document.createElement("div");
