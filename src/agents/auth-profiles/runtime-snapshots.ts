@@ -4,12 +4,21 @@ import path from "node:path";
  * Snapshots are cloned at boundaries so callers cannot mutate shared state.
  */
 import { isDeepStrictEqual } from "node:util";
+import { registerAgentDatabaseReaderCloser } from "../../infra/agent-database-readers.js";
 import { registerListener } from "../../shared/listeners.js";
 import { cloneAuthProfileStore } from "./clone.js";
+import { reportCommittedInlineAuthFailure } from "./constants.js";
 import {
   observeCachedCanonicalAuthProfileCredentials,
   observeCanonicalAuthProfileCredentials,
 } from "./credential-observation.js";
+import {
+  closeAuthProfileFileState,
+  noteAuthProfileFileWrite,
+  readAuthProfileDatabaseIdentity,
+  refreshAuthProfileFileState,
+  registerAuthProfileFileChangeListener,
+} from "./file-state.js";
 import {
   getRuntimeAuthProfileStoreMutationRevisionAtDatabasePath,
   recordRuntimeAuthProfileStorePersistedMutation,
@@ -87,6 +96,112 @@ export const runtimeAuthProfileRowsCache = createRuntimeAuthProfileRowsCache(
   (databasePath) =>
     `${getRuntimeAuthProfileStoreSnapshotRevisionAtDatabasePath(databasePath)}:${getRuntimeAuthProfileStoreMutationRevisionAtDatabasePath(databasePath)}`,
 );
+
+/** User-requested refresh reads persisted sources even before observation delivers a change. */
+export async function refreshRuntimeAuthProfileStoreSources(): Promise<void> {
+  await refreshAuthProfileFileState();
+  runtimeAuthProfileRowsCache.clear();
+}
+
+registerAgentDatabaseReaderCloser((candidates, retainedPaths) => {
+  runtimeAuthProfileRowsCache.retire(candidates, retainedPaths);
+});
+
+let refreshExternalAuth: ((paths: readonly string[]) => Promise<boolean>) | undefined;
+let externalRefresh: Promise<void> | undefined;
+let externalRefreshRevision = 0;
+const externalChanges = new Set<string>();
+
+/** Secrets activation remains the owner of resolved credential publications. */
+export function registerRuntimeAuthProfileExternalRefresh(
+  refresh: (paths: readonly string[]) => Promise<boolean>,
+): void {
+  refreshExternalAuth = refresh;
+}
+
+function invalidateExternalAuthPaths(paths: readonly string[]): void {
+  for (const databasePath of paths) {
+    const entry = runtimeAuthStoreSnapshots.get(databasePath);
+    const shared = [...runtimeAuthStoreSnapshots.values()].find(
+      ({ owner }) => owner.kind === "resolved" && owner.sharedDatabasePath === databasePath,
+    );
+    runtimeAuthProfileRowsCache.clear(databasePath);
+    if (shared?.owner.kind === "resolved") {
+      invalidateRuntimeAuthProfileStoreSnapshotsForOwner({ databasePath, ...shared.owner });
+    } else if (entry?.owner.kind === "resolved") {
+      invalidateRuntimeAuthProfileStoreSnapshotsForOwner({ databasePath, ...entry.owner });
+    } else {
+      clearRuntimeAuthProfileStoreSnapshotAtDatabasePath(databasePath);
+    }
+  }
+}
+
+function refreshExternalAuthPaths(paths: readonly string[]): void {
+  for (const pathname of paths) {
+    externalChanges.add(pathname);
+  }
+  if (externalRefresh || !externalChanges.size) {
+    return;
+  }
+  externalRefresh = (async () => {
+    const revision = externalRefreshRevision;
+    while (revision === externalRefreshRevision && externalChanges.size) {
+      const pending = [...externalChanges];
+      externalChanges.clear();
+      try {
+        if (!(await refreshExternalAuth?.(pending)) && revision === externalRefreshRevision) {
+          invalidateExternalAuthPaths(pending);
+        }
+      } catch (error) {
+        if (revision !== externalRefreshRevision) {
+          return;
+        }
+        invalidateExternalAuthPaths(pending);
+        reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
+      }
+    }
+  })().finally(() => {
+    externalRefresh = undefined;
+    refreshExternalAuthPaths([]);
+  });
+}
+
+registerAuthProfileFileChangeListener(({ directory, identityChanged, sourcesChanged }) => {
+  const required = [
+    ...new Set(
+      [...runtimeAuthStoreSnapshots].flatMap(([key, entry]) => [
+        key,
+        ...(entry.owner.kind === "resolved" ? [entry.owner.sharedDatabasePath] : []),
+      ]),
+    ),
+  ].filter(
+    (databasePath) => !readAuthProfileDatabaseIdentity(databasePath)?.key.startsWith("path:"),
+  );
+  if (identityChanged || sourcesChanged) {
+    const paths = [...runtimeAuthStoreSnapshots].flatMap(([key, entry]) => {
+      const candidates = entry.legacyCandidates;
+      return path.dirname(key) === directory ||
+        (entry.owner.kind === "resolved" &&
+          path.dirname(entry.owner.sharedDatabasePath) === directory) ||
+        (sourcesChanged &&
+          candidates &&
+          [...candidates.local, ...candidates.shared].some(
+            (source) => path.dirname(source.path) === directory,
+          ))
+        ? [key]
+        : [];
+    });
+    invalidateExternalAuthPaths(paths);
+    refreshExternalAuthPaths(paths);
+  }
+  // Session writes share these files; only changed auth rows invalidate published credentials.
+  void runtimeAuthProfileRowsCache
+    .refreshChanged(directory, required)
+    .then(refreshExternalAuthPaths)
+    .catch((error: unknown) => {
+      reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
+    });
+});
 
 registerFreshSharedAuthStoreHandoff((handoff) => {
   if (!handoff.sourceStillCurrent) {
@@ -345,6 +460,12 @@ export function replaceOwnedRuntimeAuthProfileStoreSnapshots(
     ...entry,
     store: removePersonalAuthProfileReferences(entry.store),
   }));
+  for (const entry of sharedEntries) {
+    readAuthProfileDatabaseIdentity(entry.databasePath);
+    if (entry.owner.kind === "resolved") {
+      readAuthProfileDatabaseIdentity(entry.owner.sharedDatabasePath);
+    }
+  }
   const next = new Map(
     sharedEntries.map(
       ({ databasePath, store, owner, legacyCandidates }) =>
@@ -390,6 +511,15 @@ export function replaceOwnedRuntimeAuthProfileStoreSnapshots(
   for (const [key, entry] of next) {
     runtimeAuthStoreSnapshots.set(key, entry);
   }
+  // Publishing resolved credentials does not change their captured persisted rows.
+  runtimeAuthProfileRowsCache.publishSnapshots(
+    new Set(
+      sharedEntries.flatMap((entry) => [
+        entry.databasePath,
+        ...(entry.owner.kind === "resolved" ? [entry.owner.sharedDatabasePath] : []),
+      ]),
+    ),
+  );
   // Publish the complete roster before listeners refresh any changed local or inherited owner.
   if (mutations.some(({ agentDir }) => agentDir === undefined)) {
     notifyRuntimeAuthStoreMutation(
@@ -405,6 +535,9 @@ export function replaceOwnedRuntimeAuthProfileStoreSnapshots(
 
 /** Clears all runtime auth profile snapshots. */
 export function clearRuntimeAuthProfileStoreSnapshots(): void {
+  externalRefreshRevision += 1;
+  externalChanges.clear();
+  closeAuthProfileFileState();
   const snapshotsChanged = runtimeAuthStoreSnapshots.size > 0;
   const credentialsChanged = [...runtimeAuthStoreSnapshots.values()].some(
     ({ store }) => Object.keys(store.profiles).length > 0,
@@ -585,6 +718,7 @@ export function noteRuntimeAuthProfileStorePersistedMutation(
   prepared?: ReadonlyMap<string, OwnedRuntimeSnapshot>,
 ): number {
   const ownerKey = owner?.databasePath ?? resolveRuntimeStoreKey(agentDir);
+  noteAuthProfileFileWrite(ownerKey);
   if (!mutation.credentialsChanged && !mutation.profileSetChanged && !mutation.stateChanged) {
     return getRuntimeAuthProfileStoreMutationRevisionAtDatabasePath(ownerKey);
   }

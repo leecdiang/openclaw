@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 import { observeSqliteReadSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
@@ -8,8 +10,201 @@ import { admitSqliteSchema } from "../../infra/sqlite-schema-facts.js";
 import { SqliteWorkerBroker } from "../../infra/sqlite-worker-broker.js";
 import { createRuntimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import { readAuthProfileRows } from "./sqlite-json.js";
+import type { AuthProfileRowRead } from "./types.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function emptyRows(): AuthProfileRowRead {
+  return {
+    store: { status: "readable", raw: { version: 1, profiles: {} } },
+    state: { status: "readable", raw: { lastGood: {} } },
+    cacheable: true,
+  };
+}
+
+it("refreshes published owners without a retained row baseline", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-unprepared-"), "auth.sqlite");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  expect(await cache.refreshChanged(path.dirname(databasePath), [databasePath])).toEqual([
+    databasePath,
+  ]);
+});
+
+it("does not refresh an unprepared owner replaced during observation", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-unprepared-retired-"), "auth.sqlite");
+  let revision = "1";
+  const cache = createRuntimeAuthProfileRowsCache(() => revision);
+  const observed = cache.refreshChanged(path.dirname(databasePath), [databasePath]);
+  revision = "2";
+  expect(await observed).toEqual([]);
+});
+
+it("retains cached credentials when an observed database change leaves auth rows unchanged", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-observation-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const read = vi.fn(async () => emptyRows());
+  const refresh = vi.fn(async () => emptyRows());
+  const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, refresh).read();
+  const first = await resolve();
+
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([]);
+  expect(await resolve()).toBe(first);
+  expect(read).toHaveBeenCalledOnce();
+  expect(refresh).toHaveBeenCalledOnce();
+});
+
+it("retains the freshly read baseline when its resolved snapshot is published", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-publication-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  let revision = "1";
+  const cache = createRuntimeAuthProfileRowsCache(() => revision);
+  const read = vi.fn(async () => emptyRows());
+  const refresh = vi.fn(async () => emptyRows());
+  await cache.prepare(databasePath, { read, assertCurrent() {} }, refresh, false).read();
+  revision = "2";
+  cache.publishSnapshots(new Set([databasePath]));
+  expect(await cache.refreshChanged(path.dirname(databasePath), [databasePath])).toEqual([]);
+  expect(refresh).toHaveBeenCalledOnce();
+});
+
+it("releases retired database baselines while retaining named live owners", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-retirement-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const read = vi.fn(async () => emptyRows());
+  const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }).read();
+  await resolve();
+  cache.retire([{ path: databasePath }], new Set([databasePath]));
+  await resolve();
+  expect(read).toHaveBeenCalledOnce();
+  cache.retire([{ path: databasePath }]);
+  await resolve();
+  expect(read).toHaveBeenCalledTimes(2);
+  cache.publishSnapshots(new Set());
+  await resolve();
+  expect(read).toHaveBeenCalledTimes(3);
+});
+
+it.each(["changed", "unreadable", "failed"] as const)(
+  "invalidates cached credentials after a %s external auth reread",
+  async (outcome) => {
+    const databasePath = path.join(tempDirs.make("auth-row-external-"), "auth.sqlite");
+    using database = openNodeSqliteDatabase(databasePath);
+    database.exec("CREATE TABLE cache_fixture (value)");
+    const cache = createRuntimeAuthProfileRowsCache(() => "1");
+    const read = vi.fn(async () => emptyRows());
+    const refresh = async (): Promise<AuthProfileRowRead> => {
+      if (outcome === "failed") {
+        throw new Error("External auth source is unavailable");
+      }
+      return outcome === "unreadable"
+        ? { store: { status: "unreadable" }, state: { status: "unreadable" }, cacheable: false }
+        : { ...emptyRows(), state: { status: "readable", raw: { lastGood: { example: "new" } } } };
+    };
+    const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, refresh).read();
+    const first = await resolve();
+
+    expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+    expect(await resolve()).not.toBe(first);
+    expect(read).toHaveBeenCalledTimes(2);
+  },
+);
+
+it.each(["cleared", "replaced", "overtaken by a write"] as const)(
+  "ignores an external reread after its cached owner is %s",
+  async (action) => {
+    const databasePath = path.join(tempDirs.make("auth-row-retired-"), "auth.sqlite");
+    using database = openNodeSqliteDatabase(databasePath);
+    database.exec("CREATE TABLE cache_fixture (value)");
+    const cache = createRuntimeAuthProfileRowsCache(() => "1");
+    const pending = Promise.withResolvers<AuthProfileRowRead>();
+    const refresh = vi.fn(() => pending.promise);
+    const read = vi.fn(async () => emptyRows());
+    const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, refresh).read();
+    const first = await resolve();
+    const observed = cache.refreshChanged(path.dirname(databasePath));
+    await Promise.resolve();
+    if (action === "overtaken by a write") {
+      database.exec("INSERT INTO cache_fixture VALUES (1)");
+    } else {
+      cache.clear(databasePath);
+    }
+    const replacement = action === "replaced" ? await resolve() : undefined;
+    pending.reject(new Error("Old source disappeared"));
+
+    expect(await observed).toEqual([]);
+    if (replacement) {
+      expect(await resolve()).toBe(replacement);
+    } else if (action === "overtaken by a write") {
+      expect(await resolve()).not.toBe(first);
+    }
+  },
+);
+
+it("reconciles a second observation received while the first reread is pending", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-coalesced-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec("CREATE TABLE cache_fixture (value)");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const pending = Promise.withResolvers<AuthProfileRowRead>();
+  const refresh = vi
+    .fn<() => Promise<AuthProfileRowRead>>()
+    .mockReturnValueOnce(pending.promise)
+    .mockResolvedValue({
+      ...emptyRows(),
+      state: { status: "readable", raw: { lastGood: { example: "new" } } },
+    });
+  await cache
+    .prepare(databasePath, { read: async () => emptyRows(), assertCurrent() {} }, refresh)
+    .read();
+  const first = cache.refreshChanged(path.dirname(databasePath));
+  await Promise.resolve();
+  const next = cache.refreshChanged(path.dirname(databasePath));
+  expect(next).toBe(first);
+  pending.resolve(emptyRows());
+
+  expect(await first).toEqual([databasePath]);
+  expect(refresh).toHaveBeenCalledTimes(2);
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([]);
+});
+
+it("detects an in-place auth edit from another process without a local write receipt", async () => {
+  const databasePath = path.join(tempDirs.make("auth-row-external-process-"), "auth.sqlite");
+  using database = openNodeSqliteDatabase(databasePath);
+  database.exec(`
+    CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT);
+    CREATE TABLE auth_profile_state (state_key TEXT PRIMARY KEY, state_json TEXT);
+    INSERT INTO auth_profile_store VALUES ('primary', '{"version":1,"profiles":{}}');
+    INSERT INTO auth_profile_state VALUES ('primary', '{"lastGood":{}}');
+  `);
+  admitSqliteSchema(database);
+  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const read = async () => readAuthProfileRows(database, databasePath, "agent");
+  const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, read).read();
+  const first = await resolve();
+  const updated = { lastGood: { example: "external:key" } };
+
+  await promisify(execFile)(process.execPath, [
+    "-e",
+    `const { DatabaseSync } = require("node:sqlite");
+     const db = new DatabaseSync(process.argv[1]);
+     try {
+       db.prepare("UPDATE auth_profile_state SET state_json = ? WHERE state_key = 'primary'").run(process.argv[2]);
+     } finally {
+       db.close();
+     }`,
+    databasePath,
+    JSON.stringify(updated),
+  ]);
+
+  expect(await resolve()).toBe(first);
+  expect(await cache.refreshChanged(path.dirname(databasePath))).toEqual([databasePath]);
+  expect((await resolve()).state).toEqual({ status: "readable", raw: updated });
+});
 
 it("shares immutable persisted rows across cache hits", async () => {
   const databasePath = path.join(tempDirs.make("auth-row-cache-"), "auth.sqlite");

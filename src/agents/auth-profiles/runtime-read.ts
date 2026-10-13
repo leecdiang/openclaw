@@ -15,11 +15,13 @@ import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-wo
 import { captureAuthProfileCredentialAuthority } from "../../state/user-model-account-authority.js";
 import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import type { ExternalCliOverlayOptions } from "./external-auth.js";
+import { readAuthProfileDatabaseIdentity } from "./file-state.js";
 import {
   assertAuthProfileMigrationCandidates,
   assertAuthProfileMigrationStateAtDatabasePath,
 } from "./legacy-source-diagnostic.js";
 import { resolveLegacyAuthProfileSourceCandidates } from "./legacy-source-files.js";
+import { withAuthProfileCleanup } from "./operation-cleanup.js";
 import {
   resolveSharedAuthStoreOwnershipAsync,
   resolveSharedAuthStorePath as resolveSharedAuthPath,
@@ -178,8 +180,7 @@ export function createAuthProfileStoreRuntimeReader({
       getScopedAuthProfileEnv() ?? suppliedEnv ?? process.env,
     );
     env.OPENCLAW_STATE_DIR = resolveStateDir(env);
-    const reusePersistedRows =
-      !scope.isolated &&
+    const trackPersistedRows =
       !isArtifactPreservingStateRead() &&
       !getOpenClawDatabaseMaintenanceScope() &&
       !getActiveOpenClawStateDatabaseReadSnapshot({ env });
@@ -282,6 +283,18 @@ export function createAuthProfileStoreRuntimeReader({
     const inCapturedScope = <Value>(run: () => Value): Value =>
       scope.run(effectiveAgentDir, env, run);
     const rowsByPath = new Map<string, AuthProfileRowRead>();
+    const refreshRows = async (databasePath: string): Promise<AuthProfileRowRead> => {
+      const context = captureOpenClawStateWorkerContext({ env });
+      if (databasePath === context.admission.databasePath) {
+        return readSharedAuthProfileRows(context);
+      }
+      const reader = prepareAgentAuthProfileRowsRead({
+        databasePath,
+        agentId: resolveAuthProfileDatabaseOwnerId(path.dirname(databasePath)),
+        env,
+      });
+      return withAuthProfileCleanup(reader.read, () => reader.dispose());
+    };
     const stores = new Map<string, Result<AuthProfileStore, unknown>>();
     let active = true;
     let accepting = true;
@@ -312,9 +325,19 @@ export function createAuthProfileStoreRuntimeReader({
         requestOptions.deferScopedMigrationRefusals,
       );
       const candidates = resolveLegacyAuthProfileSourceCandidates({ agentDir: ownerAgentDir, env });
+      if (trackPersistedRows) {
+        readAuthProfileDatabaseIdentity(databasePath);
+      }
       const preparedReader =
         rowReaders.get(databasePath) ??
-        (reusePersistedRows ? runtimeAuthProfileRowsCache.prepare(databasePath, reader) : reader);
+        (trackPersistedRows
+          ? runtimeAuthProfileRowsCache.prepare(
+              databasePath,
+              reader,
+              () => refreshRows(databasePath),
+              !scope.isolated,
+            )
+          : reader);
       rowReaders.set(databasePath, preparedReader);
       const capturedAuthority = credentialAuthorities.get(databasePath);
       if (capturedAuthority && !capturedAuthority.ok) {

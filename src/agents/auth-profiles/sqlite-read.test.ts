@@ -5,6 +5,7 @@ import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js"
 import { createDeferredCore } from "../../shared/deferred.js";
 import * as resources from "../../state/openclaw-agent-db-resources.js";
 import * as rootContext from "../../state/openclaw-state-worker-context.js";
+import { closeAuthProfileFileState, registerAuthProfileFileChangeListener } from "./file-state.js";
 import { prepareAgentAuthProfileRowsRead } from "./sqlite-read.js";
 import type { AuthProfileRowRead } from "./types.js";
 
@@ -33,7 +34,19 @@ function prepare(env: NodeJS.ProcessEnv = { OPENCLAW_STATE_DIR: "/fixture" }) {
   return reader;
 }
 
+function nextFileChange(): Promise<void> {
+  return new Promise((resolve) => {
+    const unsubscribe = registerAuthProfileFileChangeListener(({ directory }) => {
+      if (directory === path.dirname(databasePath)) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+}
+
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   rootCurrent = true;
   databasePath = path.join(tempDirs.make("auth-row-identity-"), "auth.sqlite");
   fs.writeFileSync(databasePath, "synthetic auth database");
@@ -56,15 +69,20 @@ beforeEach(() => {
 afterEach(async () => {
   await Promise.all([...readers].map((reader) => reader.dispose()));
   readers.clear();
+  closeAuthProfileFileState();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("prepared auth profile row reads", () => {
-  it("revalidates the captured file without repeating canonical path discovery", async () => {
+  it("serves prepared file authority without filesystem calls on subsequent reads", async () => {
     const reader = prepare();
     const realpath = vi.spyOn(fs.realpathSync, "native");
+    const stat = vi.spyOn(fs, "statSync");
     await expect(reader.read()).resolves.toEqual(rows);
+    await expect(prepare().read()).resolves.toEqual(rows);
     expect(realpath).not.toHaveBeenCalled();
+    expect(stat).not.toHaveBeenCalled();
   });
 
   it("retains revocable read authority even when persisted rows come from a cache", async () => {
@@ -78,9 +96,12 @@ describe("prepared auth profile row reads", () => {
   it("rejects rows whose source identity changed before the child settled", async () => {
     const reader = prepare();
     child.read.mockImplementation(async () => {
+      const changed = nextFileChange();
       const replacement = `${databasePath}.replacement`;
       fs.writeFileSync(replacement, "replacement auth database");
       fs.renameSync(replacement, databasePath);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await changed;
       return rows;
     });
     await expect(reader.read()).rejects.toThrow("database file identity changed");
@@ -98,7 +119,10 @@ describe("prepared auth profile row reads", () => {
   it("retains captured absence when the first session creates its database", async () => {
     fs.unlinkSync(databasePath);
     const reader = prepare();
+    const changed = nextFileChange();
     fs.writeFileSync(databasePath, "created auth database");
+    await vi.advanceTimersByTimeAsync(30_000);
+    await changed;
     await expect(reader.read()).resolves.toEqual({
       store: { status: "missing", reason: "database" },
       state: { status: "missing", reason: "database" },
