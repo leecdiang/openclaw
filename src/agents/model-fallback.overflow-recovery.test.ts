@@ -7,7 +7,6 @@ import { resetFallbackSkipCacheForTest } from "./fallback-skip-cache.test-suppor
 import {
   makeModelFallbackConfig,
   withModelFallbackWorkspace,
-  writeFallbackAuthStore,
 } from "./model-fallback.run-embedded.e2e.test-support.js";
 import { SessionManager } from "./sessions/session-manager.js";
 import {
@@ -75,7 +74,6 @@ describe("embedded overflow recovery before model fallback", () => {
     { outcome: "side effects prevent replay", primaryRecovers: false, sideEffects: true },
   ])("handles $outcome", async ({ primaryRecovers, sideEffects }) => {
     await withModelFallbackWorkspace(async ({ agentDir, workspaceDir }) => {
-      await writeFallbackAuthStore(agentDir);
       const events: string[] = [];
       compact.mockImplementation(async () => {
         events.push("compact");
