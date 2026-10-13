@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
@@ -10,9 +11,15 @@ import { admitSqliteSchema } from "../../infra/sqlite-schema-facts.js";
 import { SqliteWorkerBroker } from "../../infra/sqlite-worker-broker.js";
 import { createRuntimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import { readAuthProfileRows } from "./sqlite-json.js";
+import {
+  waitForAuthProfileNativePublications,
+  watchAuthProfileNativeCommits,
+} from "./store-update-commit.js";
 import type { AuthProfileRowRead } from "./types.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const waitForSourcePublication = (databasePath: string) =>
+  waitForAuthProfileNativePublications([databasePath]);
 
 function emptyRows(): AuthProfileRowRead {
   return {
@@ -27,7 +34,7 @@ it.each(["completed", "failed"] as const)(
   async (outcome) => {
     const databasePath = path.join(tempDirs.make("auth-unadmitted-source-"), "auth.sqlite");
     let revision = "1";
-    const cache = createRuntimeAuthProfileRowsCache(() => revision);
+    const cache = createRuntimeAuthProfileRowsCache(() => revision, waitForSourcePublication);
     const refresh = vi.fn(async () => ({
       ...emptyRows(),
       state: { status: "readable" as const, raw: { lastGood: { example: "foreign" } } },
@@ -60,7 +67,7 @@ it.each(["completed", "failed"] as const)(
 
 it("rereads unadmitted source when SQLite admission appears during observation", async () => {
   const databasePath = path.join(tempDirs.make("auth-source-admission-"), "auth.sqlite");
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const rows = emptyRows();
   const pending = Promise.withResolvers<AuthProfileRowRead>();
   const refresh = vi.fn(async () => rows).mockReturnValueOnce(pending.promise);
@@ -82,7 +89,7 @@ it("rereads unadmitted source when SQLite admission appears during observation",
 
 it("retains the first cold read's source when that read installs SQLite admission", async () => {
   const databasePath = path.join(tempDirs.make("auth-cold-source-admission-"), "auth.sqlite");
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const pending = Promise.withResolvers<AuthProfileRowRead>();
   const read = vi.fn(() => pending.promise);
   const refresh = vi.fn(async () => ({
@@ -102,12 +109,54 @@ it("retains the first cold read's source when that read installs SQLite admissio
   expect(refresh).toHaveBeenCalledOnce();
 });
 
+it("waits for host publication before comparing newly committed rows", async () => {
+  const databasePath = path.join(
+    realpathSync(tempDirs.make("auth-observed-publication-")),
+    "auth.sqlite",
+  );
+  const joining = Promise.withResolvers<void>();
+  const wait = (pathname: string) => {
+    const pending = waitForSourcePublication(pathname);
+    joining.resolve();
+    return pending;
+  };
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", wait);
+  const pending = Promise.withResolvers<AuthProfileRowRead>();
+  const source = { version: 1, profiles: {}, lastGood: { example: "owned" } };
+  const rows: AuthProfileRowRead = {
+    ...emptyRows(),
+    state: { status: "readable", raw: { lastGood: source.lastGood } },
+  };
+  const refresh = vi.fn(async () => rows).mockReturnValueOnce(pending.promise);
+  cache.recordSource(databasePath, "fixture", { version: 1, profiles: {} }, refresh);
+  const observing = cache.refreshChanged(path.dirname(databasePath));
+  await Promise.resolve();
+  const publication = watchAuthProfileNativeCommits(databasePath);
+  try {
+    pending.resolve(rows);
+    expect(
+      await Promise.race([
+        observing.then((changed) => ({ published: changed })),
+        joining.promise.then(() => "waiting for publication"),
+      ]),
+    ).toBe("waiting for publication");
+
+    cache.recordSource(databasePath, "fixture", source, refresh);
+    publication.dispose();
+
+    expect(await observing).toEqual([]);
+    expect(refresh).toHaveBeenCalledTimes(2);
+  } finally {
+    publication.dispose();
+  }
+});
+
 it("keeps committed source provenance while dropping reusable rows", async () => {
   const databasePath = path.join(tempDirs.make("auth-row-source-publication-"), "auth.sqlite");
   using database = openNodeSqliteDatabase(databasePath);
   database.exec("CREATE TABLE cache_fixture (value)");
   let revision = "1";
-  const cache = createRuntimeAuthProfileRowsCache(() => revision);
+  const cache = createRuntimeAuthProfileRowsCache(() => revision, waitForSourcePublication);
   const rows = emptyRows();
   const read = vi.fn(async () => rows);
   const refresh = vi.fn(async () => rows);
@@ -129,7 +178,7 @@ it("retains cached credentials when an observed database change leaves auth rows
   const databasePath = path.join(tempDirs.make("auth-row-observation-"), "auth.sqlite");
   using database = openNodeSqliteDatabase(databasePath);
   database.exec("CREATE TABLE cache_fixture (value)");
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const read = vi.fn(async () => emptyRows());
   const refresh = vi.fn(async () => emptyRows());
   const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, refresh).read();
@@ -146,7 +195,7 @@ it("retains the freshly read baseline when its resolved snapshot is published", 
   using database = openNodeSqliteDatabase(databasePath);
   database.exec("CREATE TABLE cache_fixture (value)");
   let revision = "1";
-  const cache = createRuntimeAuthProfileRowsCache(() => revision);
+  const cache = createRuntimeAuthProfileRowsCache(() => revision, waitForSourcePublication);
   const read = vi.fn(async () => emptyRows());
   const refresh = vi.fn(async () => emptyRows());
   await cache.prepare(databasePath, { read, assertCurrent() {} }, refresh, false).read();
@@ -160,7 +209,7 @@ it("releases retired database baselines while retaining named live owners", asyn
   const databasePath = path.join(tempDirs.make("auth-row-retirement-"), "auth.sqlite");
   using database = openNodeSqliteDatabase(databasePath);
   database.exec("CREATE TABLE cache_fixture (value)");
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const read = vi.fn(async () => emptyRows());
   const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }).read();
   await resolve();
@@ -181,7 +230,7 @@ it.each(["changed", "unreadable", "failed"] as const)(
     const databasePath = path.join(tempDirs.make("auth-row-external-"), "auth.sqlite");
     using database = openNodeSqliteDatabase(databasePath);
     database.exec("CREATE TABLE cache_fixture (value)");
-    const cache = createRuntimeAuthProfileRowsCache(() => "1");
+    const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
     const read = vi.fn(async () => emptyRows());
     const refresh = async (): Promise<AuthProfileRowRead> => {
       if (outcome === "failed") {
@@ -206,7 +255,7 @@ it.each(["cleared", "replaced", "overtaken by a write"] as const)(
     const databasePath = path.join(tempDirs.make("auth-row-retired-"), "auth.sqlite");
     using database = openNodeSqliteDatabase(databasePath);
     database.exec("CREATE TABLE cache_fixture (value)");
-    const cache = createRuntimeAuthProfileRowsCache(() => "1");
+    const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
     const pending = Promise.withResolvers<AuthProfileRowRead>();
     const refresh = vi.fn(() => pending.promise);
     const read = vi.fn(async () => emptyRows());
@@ -235,7 +284,7 @@ it("reconciles a second observation received while the first reread is pending",
   const databasePath = path.join(tempDirs.make("auth-row-coalesced-"), "auth.sqlite");
   using database = openNodeSqliteDatabase(databasePath);
   database.exec("CREATE TABLE cache_fixture (value)");
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const pending = Promise.withResolvers<AuthProfileRowRead>();
   const refresh = vi
     .fn<() => Promise<AuthProfileRowRead>>()
@@ -268,7 +317,7 @@ it("detects an in-place auth edit from another process without a local write rec
     INSERT INTO auth_profile_state VALUES ('primary', '{"lastGood":{}}');
   `);
   admitSqliteSchema(database);
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const read = async () => readAuthProfileRows(database, databasePath, "agent");
   const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }, read).read();
   const first = await resolve();
@@ -314,7 +363,7 @@ it("shares immutable persisted rows across cache hits", async () => {
     cacheable: true,
   };
   const read = vi.fn(async () => rows);
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const resolve = () => cache.prepare(databasePath, { read, assertCurrent: () => {} }).read();
   const first = await resolve();
   expect(await resolve()).toBe(first);
@@ -347,7 +396,7 @@ it("retains rows across session writes and invalidates them on auth writer-worke
   `);
   admitSqliteSchema(database);
   const broker = new SqliteWorkerBroker();
-  const cache = createRuntimeAuthProfileRowsCache(() => "1");
+  const cache = createRuntimeAuthProfileRowsCache(() => "1", waitForSourcePublication);
   const read = vi.fn(async () => readAuthProfileRows(database, databasePath, "agent"));
   const resolve = () => cache.prepare(databasePath, { read, assertCurrent() {} }).read();
   const observation = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);

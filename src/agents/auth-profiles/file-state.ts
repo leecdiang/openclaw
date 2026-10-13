@@ -11,7 +11,6 @@ import {
   readDatabaseIdentityBirthtime,
   type DatabasePathIdentity,
 } from "../../infra/sqlite-worker-identity.js";
-import { registerListener } from "../../shared/listeners.js";
 import { isArtifactPreservingStateRead } from "../../state/artifact-preserving-state-reads.js";
 import { registerOpenClawStateDatabaseAsyncResource } from "../../state/openclaw-state-db-cache.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../../state/openclaw-state-maintenance-context.js";
@@ -112,7 +111,7 @@ function refreshDirectory(directory: string, state: DirectoryState): Promise<voi
         if (state.identities.size || sourcesChanged) {
           await Promise.all(
             Array.from(listeners, (listener) =>
-              listener({ directory, identityChanged, sourcesChanged }),
+              Promise.resolve(listener({ directory, identityChanged, sourcesChanged })),
             ),
           );
         }
@@ -211,7 +210,10 @@ export function authProfileSourceExists(sourcePath: string): boolean {
 }
 
 export function registerAuthProfileFileChangeListener(listener: FileChangeListener) {
-  return registerListener(listeners, listener);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /** Explicit refresh joins observation without retiring unchanged file authority. */

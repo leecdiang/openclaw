@@ -219,5 +219,5 @@ it("retires observations with the database owner", async () => {
     deleted: false,
   });
   expect(() => captured.assertCurrent()).toThrow("database file identity changed");
-  expect(captureAuthProfileFileIdentity(databasePath).assertCurrent).not.toThrow();
+  expect(() => captureAuthProfileFileIdentity(databasePath).assertCurrent()).not.toThrow();
 });

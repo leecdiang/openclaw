@@ -41,7 +41,10 @@ function sourceFromRows(rows: AuthProfileRowRead, databasePath: string): AuthPro
 }
 
 /** A derived rows cache; the runtime snapshot owner supplies publication generations. */
-export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string) => string) {
+export function createRuntimeAuthProfileRowsCache(
+  revisionAtPath: (path: string) => string,
+  waitForSourcePublication: (databasePath: string) => Promise<void>,
+) {
   type Refresh = () => Promise<AuthProfileRowRead>;
   type Entry = {
     identity: string | undefined;
@@ -171,6 +174,8 @@ export function createRuntimeAuthProfileRowsCache(revisionAtPath: (path: string)
               } catch {
                 // A failed external reread cannot certify the cached credential facts.
               }
+              // Disk commits can precede their source publication while the read awaits.
+              await waitForSourcePublication(databasePath);
               if (
                 entries.get(databasePath) === entry &&
                 revisionAtPath(databasePath) === entry.revision &&

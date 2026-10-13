@@ -44,7 +44,7 @@ export async function waitForAuthProfileNativePublications(
 ): Promise<void> {
   const paths = [...new Set(databasePaths)];
   for (;;) {
-    const publications = paths.flatMap((pathname) => [...(pending.get(pathname) ?? [])]);
+    const publications = paths.flatMap((pathname) => Array.from(pending.get(pathname) ?? []));
     if (!publications.length) {
       return;
     }

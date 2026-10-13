@@ -75,7 +75,8 @@ function attach(directory: Directory) {
       sources.set(candidate, source);
       directory.source = source;
       watcher.on("error", () => {
-        for (const entry of [...source.directories]) {
+        const affected = Array.from(source.directories);
+        for (const entry of affected) {
           detach(entry);
           notify(entry);
         }
@@ -108,7 +109,8 @@ export function observeOwnedDirectory(
   selected.listeners.add(listener);
   fallback ??= runInObservationContext(() =>
     setInterval(() => {
-      for (const entry of [...directories.values()]) {
+      const observed = Array.from(directories.values());
+      for (const entry of observed) {
         if (directories.get(entry.path) !== entry) {
           continue;
         }
