@@ -4,7 +4,9 @@ import type { Virtualizer } from "@tanstack/virtual-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranscriptEndAnchor } from "./chat-transcript-end-anchor.ts";
 import {
+  isTranscriptProgrammaticScroll,
   observeTranscriptOffset,
+  scrollTranscriptOffset,
   TranscriptOffsetState,
 } from "./chat-transcript-offset-observer.ts";
 import { TranscriptPrependAnchor } from "./chat-transcript-prepend-anchor.ts";
@@ -108,6 +110,128 @@ describe("transcript prepend anchor", () => {
     expect(anchor.messageKey).toBeNull();
     expect(reconcile).toHaveBeenCalledOnce();
   });
+
+  it.each([0, 1])(
+    "preserves the reader through deferred native scrolling with %spx rounding and later wheel input",
+    (rounding) => {
+      vi.useFakeTimers();
+      const { scroller, bubble, anchor, measureRows } = fixture(2000);
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrameId = 0;
+      let frameTime = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        const id = ++nextFrameId;
+        frames.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+      const commitFrame = () => {
+        frameTime += 16;
+        for (const id of Array.from(frames.keys())) {
+          const callback = frames.get(id);
+          frames.delete(id);
+          callback?.(frameTime);
+        }
+      };
+      let contentTop = 290;
+      let deferNativeScroll = false;
+      bubble.getBoundingClientRect = () => rect(contentTop - scroller.scrollTop, 180);
+      scroller.scrollTop = 200;
+      scroller.scrollTo = (options: ScrollToOptions | number, y?: number) => {
+        const target = typeof options === "number" ? (y ?? 0) : (options.top ?? scroller.scrollTop);
+        const write = () => {
+          const before = scroller.scrollTop;
+          scroller.scrollTop = Math.max(
+            0,
+            Math.min(target - (deferNativeScroll ? rounding : 0), 1500),
+          );
+          if (scroller.scrollTop !== before) {
+            scroller.dispatchEvent(new Event("scroll"));
+          }
+        };
+        if (deferNativeScroll) {
+          requestAnimationFrame(write);
+        } else {
+          write();
+        }
+      };
+      const state = new TranscriptOffsetState();
+      const owner = {
+        state,
+        getScrollElement: () => scroller,
+        prependAnchor: anchor,
+        endAnchor: new TranscriptEndAnchor(),
+        canFollowEnd: () => false,
+        isProgrammaticScroll: () => isTranscriptProgrammaticScroll(state, scroller),
+        cancelScroll: () => anchor.clear(),
+        onLayoutCorrection: vi.fn(),
+        requestUpdate: vi.fn(),
+        onOffset: vi.fn(() => false),
+        onReaderScroll: vi.fn(),
+        onComposerLayout: vi.fn(),
+      };
+      const controller = new VirtualizerController<HTMLDivElement, HTMLElement>(
+        {
+          addController: vi.fn(),
+          removeController: vi.fn(),
+          requestUpdate: vi.fn(),
+          updateComplete: Promise.resolve(true),
+        },
+        {
+          count: 1,
+          estimateSize: () => 2000,
+          initialOffset: 200,
+          getScrollElement: () => scroller,
+          observeElementRect: (_, callback) => callback({ width: 800, height: 500 }),
+          observeElementOffset: (virtualizer, callback) =>
+            observeTranscriptOffset(owner, virtualizer, callback),
+          scrollToFn: (offset, options, virtualizer) =>
+            scrollTranscriptOffset(state, offset, options, virtualizer),
+        },
+      );
+      const instance = controller.getVirtualizer();
+      controller.hostConnected();
+      controller.hostUpdated();
+      try {
+        anchor.messageKeys = messages("visible");
+        anchor.capture(scroller, false);
+        anchor.messageKeys = messages("older", "visible");
+        anchor.capture(scroller, false);
+        contentTop += 40;
+        deferNativeScroll = true;
+        const reconcile = () => {
+          if (anchor.update(scroller, instance, measureRows)) {
+            state.syncNativeOffset?.();
+            anchor.scheduleReconcile(reconcile);
+          }
+        };
+        reconcile();
+        expect(scroller.scrollTop).toBe(200);
+        for (let frame = 0; frame < 6; frame += 1) {
+          commitFrame();
+        }
+        expect(scroller.scrollTop).toBe(240 - rounding);
+        expect(bubble.getBoundingClientRect().top).toBe(90 + rounding);
+        expect(anchor.messageKey).toBeNull();
+
+        // A new projection can still yield to actual reader intent after
+        // programmatic restoration; maintenance provenance cannot lock the reader.
+        anchor.capture(scroller, false, true);
+        expect(anchor.messageKey).toBe("visible");
+        scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -20 }));
+        scroller.scrollTop -= 20;
+        scroller.dispatchEvent(new Event("scroll"));
+        expect(anchor.update(scroller, instance, measureRows)).toBe(false);
+        expect(anchor.messageKey).toBeNull();
+        expect(scroller.scrollTop).toBe(220 - rounding);
+        expect(bubble.getBoundingClientRect().top).toBe(110 + rounding);
+      } finally {
+        anchor.clear();
+        controller.hostDisconnected();
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("preserves a partially visible retained message rather than overscan across measurement and DOM replacement", () => {
     const { scroller, row, bubble, virtualizer, instance, anchor, measureRows } = fixture();
