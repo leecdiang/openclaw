@@ -97,7 +97,7 @@ async function withReceiptFixture(
 }
 
 describe("canonical proof on physical database validation", () => {
-  it("reuses read validation without filesystem checks and revokes observed replacements", async () => {
+  it("retains read validation and observation across native handle closure", async () => {
     await withReceiptFixture(false, (database) => {
       const captured = captureOpenClawAgentDatabaseReadValidation(database);
       expect(captured?.canonicalPath).toBe(database.path);
@@ -121,7 +121,7 @@ describe("canonical proof on physical database validation", () => {
         observedValidationDirectories.some(
           (observer) => observer.active && observer.directory === path.dirname(database.path),
         ),
-      ).toBe(false);
+      ).toBe(true);
       expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
         captured?.validation.receiptId,
       );
@@ -129,6 +129,9 @@ describe("canonical proof on physical database validation", () => {
       fs.copyFileSync(database.path, replacement);
       fs.renameSync(replacement, database.path);
       expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(1);
+      expect(captureOpenClawAgentDatabaseReadValidation(database)?.validation.receiptId).toBe(
+        captured?.validation.receiptId,
+      );
       for (const observer of observedValidationDirectories) {
         if (observer.active && observer.directory === path.dirname(database.path)) {
           observer.notify(path.basename(database.path));
@@ -138,21 +141,11 @@ describe("canonical proof on physical database validation", () => {
         "Session reader validation is no longer current",
       );
       expect(Atomics.load(new Int32Array(captured!.validation.valid), 0)).toBe(0);
-    });
-  });
-
-  it("rechecks a retained receipt when its closed path is read after replacement", async () => {
-    await withReceiptFixture(false, (database) => {
-      const captured = captureOpenClawAgentDatabaseReadValidation(database)!;
-      closeOpenClawAgentDatabaseByPath(database.path);
-      const replacement = `${database.path}.replacement`;
-      fs.copyFileSync(database.path, replacement);
-      fs.renameSync(replacement, database.path);
-      expect(Atomics.load(new Int32Array(captured.validation.valid), 0)).toBe(1);
-      expect(captureOpenClawAgentDatabaseReadValidation(database)).toBeUndefined();
-      expect(() => captured.assertCurrent()).toThrow(
-        "Session reader validation is no longer current",
-      );
+      expect(
+        observedValidationDirectories.some(
+          (observer) => observer.active && observer.directory === path.dirname(database.path),
+        ),
+      ).toBe(false);
     });
   });
 

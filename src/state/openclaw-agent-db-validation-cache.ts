@@ -41,7 +41,6 @@ import {
 } from "./openclaw-agent-db-identity.js";
 import {
   matchesAgentDatabaseReadCandidatePath,
-  registerOpenClawAgentDatabaseSyncResource,
   type OpenClawAgentDatabaseReadCandidateResource,
 } from "./openclaw-agent-db-resources.js";
 import {
@@ -77,7 +76,7 @@ function releaseValidationObservation(pathname: string): void {
   validationObservations.get(pathname)?.close();
 }
 
-function observeValidationPath(pathname: string, agentId: string): void {
+function observeValidationPath(pathname: string): void {
   if (validationObservations.has(pathname)) {
     return;
   }
@@ -102,33 +101,13 @@ function observeValidationPath(pathname: string, agentId: string): void {
       revalidate();
     }
   });
-  let active = true;
-  let unregister = () => {};
-  const observation = {
+  // Retained proof outlives native handles; its cache owns observation cleanup.
+  validationObservations.set(pathname, {
     close() {
-      if (!active) {
-        return;
-      }
-      active = false;
       watched.close();
-      unregister();
-      if (validationObservations.get(pathname) === observation) {
-        validationObservations.delete(pathname);
-      }
+      validationObservations.delete(pathname);
     },
-  };
-  validationObservations.set(pathname, observation);
-  try {
-    unregister = registerOpenClawAgentDatabaseSyncResource({
-      agentId,
-      path: pathname,
-      revoke: () => observation.close(),
-      close: () => observation.close(),
-    });
-  } catch (error) {
-    observation.close();
-    throw error;
-  }
+  });
   // The first subscriber must not retain a file replaced before observation began.
   revalidate();
 }
@@ -336,7 +315,7 @@ export function captureOpenClawAgentDatabaseReadValidation(
   }
   let canonicalPath = database.path;
   if (validatedPaths.has(canonicalPath)) {
-    observeValidationPath(canonicalPath, current.agentId);
+    observeValidationPath(canonicalPath);
     if (Atomics.load(new Int32Array(current.valid), 0) !== 1) {
       return undefined;
     }
