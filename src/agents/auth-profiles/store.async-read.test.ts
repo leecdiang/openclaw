@@ -28,6 +28,7 @@ import type { AuthProfileStore, AuthProfileRowRead } from "./types.js";
 
 const reader = vi.hoisted(() => ({
   identity: undefined,
+  signal: new AbortController().signal,
   captureCredentialAuthority: () => undefined,
   read: vi.fn(),
   assertCurrent: vi.fn(),
