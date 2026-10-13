@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { prepareSecretsRuntimeFastPathSnapshot } from "../../secrets/runtime-fast-path.js";
 import {
   activateSecretsRuntimeSnapshotState,
@@ -14,7 +14,6 @@ import { withEnv } from "../../test-utils/env.js";
 import { loadPersistedAuthProfileStore, loadPersistedSharedAuthProfileStore } from "./persisted.js";
 import {
   getRuntimeAuthProfileStoreCredentialsRevision,
-  registerRuntimeAuthProfileStoreMutationListener,
   getRuntimeAuthProfileStoreSnapshotsRevision,
   listOwnedRuntimeAuthProfileStoreSnapshots,
   prepareRuntimeAuthProfileStoreSnapshots,
@@ -106,12 +105,6 @@ describe("explicit auth state ownership", () => {
         bookkeepingOwner === "mixed-live",
       );
 
-      const mutationStacks: string[] = [];
-      onTestFinished(
-        registerRuntimeAuthProfileStoreMutationListener((event) => {
-          mutationStacks.push(`${JSON.stringify(event)}\n${new Error("Auth mutation").stack}`);
-        }),
-      );
       await closeOpenClawAgentDatabaseByPathAsync(first.agentPath);
       if (bookkeepingOwner === "cleared-local") {
         await updateAuthProfileStoreWithLock({
@@ -126,7 +119,7 @@ describe("explicit auth state ownership", () => {
       } else {
         await updateBookkeeping(second, 20);
       }
-      expect(getRuntimeAuthProfileStoreCredentialsRevision(), mutationStacks.join("\n")).toBe(
+      expect(getRuntimeAuthProfileStoreCredentialsRevision()).toBe(
         prepared.snapshot.authStoreCredentialsRevision,
       );
       expect(snapshotAt(first.agentPath)?.runtimeInheritsMainState === true).toBe(
@@ -225,12 +218,6 @@ describe("explicit auth state ownership", () => {
       const owned = getActiveSecretsRuntimeSnapshotState()!;
       const revision = getActiveSecretsRuntimeSnapshotRevisionState();
       const expected = mode === "rollback" ? first : third;
-      const mutationStacks: string[] = [];
-      onTestFinished(
-        registerRuntimeAuthProfileStoreMutationListener((event) => {
-          mutationStacks.push(`${JSON.stringify(event)}\n${new Error("Auth mutation").stack}`);
-        }),
-      );
       if (mode === "rollback") {
         await closeOpenClawAgentDatabaseByPathAsync(resolveAuthProfileDatabasePath(agentDir));
         await updateAuthProfileStoreWithLock({
@@ -264,10 +251,9 @@ describe("explicit auth state ownership", () => {
           ),
         ).toBe(true);
       }
-      expect(
-        snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles.shared,
-        mutationStacks.join("\n"),
-      ).toEqual(apiKey(mode === "rollback" ? "first" : currentKey));
+      expect(snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.profiles.shared).toEqual(
+        apiKey(mode === "rollback" ? "first" : currentKey),
+      );
       if (mode === "rollback") {
         expect(
           snapshotAt(resolveAuthProfileDatabasePath(agentDir))?.usageStats?.local?.lastUsed,

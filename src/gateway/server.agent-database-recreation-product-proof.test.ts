@@ -234,12 +234,6 @@ describe("agent database recreation product proof", () => {
           if (parentReader.status !== "readable") {
             throw new Error("Expected the surviving agent's retained auth reader");
           }
-          const closeStacks: string[] = [];
-          const closeParentReader = parentReader.db.close.bind(parentReader.db);
-          vi.spyOn(parentReader.db, "close").mockImplementation(() => {
-            closeStacks.push(new Error("Retained auth reader closed").stack ?? "Unknown close");
-            closeParentReader();
-          });
           try {
             const readParentStore = () =>
               JSON.parse(readAuthProfileJsonCellText(parentReader.db, "store", "agent") ?? "null");
@@ -266,7 +260,7 @@ describe("agent database recreation product proof", () => {
               ),
               deleteFiles: true,
             });
-            expect(parentReader.db.isOpen, closeStacks.join("\n")).toBe(true);
+            expect(parentReader.db.isOpen).toBe(true);
             expect(readParentStore()).toEqual(survivorStore);
             const beforeRecovery = await readers.run(survivorInput, {});
             expect(beforeRecovery.databaseFound).toBe(true);
@@ -275,7 +269,7 @@ describe("agent database recreation product proof", () => {
               client.request("agents.delete", { agentId: staleAgentId, deleteFiles: true }),
             ).resolves.toMatchObject({ agentId: staleAgentId, ok: true, failed: [] });
 
-            expect(parentReader.db.isOpen, closeStacks.join("\n")).toBe(true);
+            expect(parentReader.db.isOpen).toBe(true);
             expect(readParentStore()).toEqual(survivorStore);
             const afterRecovery = await readers.run(survivorInput, {});
             expect(afterRecovery.threadId).toBe(beforeRecovery.threadId);

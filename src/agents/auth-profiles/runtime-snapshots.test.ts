@@ -67,6 +67,13 @@ describe("runtime auth profile snapshots", () => {
       throw new Error("Expected a pooled auth reader");
     }
     try {
+      const revision = getRuntimeAuthProfileStoreSnapshotRevision(agentDir);
+      setRuntimeAuthProfileStoreSnapshot(
+        { ...createStore("reader-owner"), usageStats: { "openai:default": { lastUsed: 2 } } },
+        agentDir,
+      );
+      expect(getRuntimeAuthProfileStoreSnapshotRevision(agentDir)).not.toBe(revision);
+      expect(reader.db.isOpen).toBe(true);
       clearRuntimeAuthProfileStoreSnapshotCore(path.join(agentDir, "unrelated"));
       expect(reader.db.isOpen).toBe(true);
       expect(reader.db.prepare("SELECT value FROM reader_fixture").get()).toEqual({

@@ -248,7 +248,10 @@ export function createRuntimeAuthProfileSnapshotSelection(
 
   return {
     /** Newer incremental views can still omit this write; discard matching owner views on failure. */
-    invalidateRuntimeAuthProfileStoreSnapshotsForOwner: (owner: AuthProfileStoreOwner) => {
+    invalidateRuntimeAuthProfileStoreSnapshotsForOwner: (
+      owner: AuthProfileStoreOwner,
+      isCurrent?: (databasePath: string) => boolean,
+    ) => {
       const targets = [
         {
           databasePath: owner.databasePath,
@@ -263,6 +266,9 @@ export function createRuntimeAuthProfileSnapshotSelection(
       ];
       for (const target of targets) {
         try {
+          if (isCurrent && !isCurrent(target.databasePath)) {
+            continue;
+          }
           const entry = snapshots.get(target.databasePath);
           if (!entry || runtimeAuthProfileSnapshotSharesOwner(entry.owner, owner)) {
             invalidate(target.databasePath, target.agentDir);

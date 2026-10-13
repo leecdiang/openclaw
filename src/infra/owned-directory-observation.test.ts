@@ -1,10 +1,16 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { observeOwnedDirectory } from "./owned-directory-observation.js";
+import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
+
+const importingScope = new AsyncLocalStorage<string>();
+const { observeOwnedDirectory } = await runInDetachedAsyncContext(() =>
+  importingScope.run("retired-importer", () => import("./owned-directory-observation.js")),
+);
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const subscriptions: Array<{ close(): void }> = [];
@@ -17,6 +23,20 @@ afterEach(() => {
 });
 
 describe("process-owned directory observation", () => {
+  it("creates long-lived observations outside importer and caller authority", () => {
+    const directory = tempDirs.make("owned-directory-authority-");
+    const watch = fs.watch;
+    const scopes: Array<string | undefined> = [];
+    vi.spyOn(fs, "watch").mockImplementation((...args: Parameters<typeof watch>) => {
+      scopes.push(importingScope.getStore());
+      return watch(...args);
+    });
+    importingScope.run("retired-caller", () => {
+      subscriptions.push(observeOwnedDirectory(directory, () => {}));
+    });
+    expect(scopes).toEqual([undefined]);
+  });
+
   it("shares one watcher and reconciles a separate process's atomic replacement", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const directory = tempDirs.make("owned-directory-external-");

@@ -1,6 +1,6 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
+import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 
 type Listener = (filename?: string) => void;
 type Directory = {
@@ -13,8 +13,6 @@ type Source = { path: string; watcher: fs.FSWatcher; directories: Set<Directory>
 const directories = new Map<string, Directory>();
 const sources = new Map<string, Source>();
 let fallback: ReturnType<typeof setInterval> | undefined;
-// Watchers outlive the request that first prepares an owner.
-const runInObservationContext = AsyncLocalStorage.snapshot();
 
 function detach(directory: Directory) {
   const source = directory.source;
@@ -42,7 +40,7 @@ function attach(directory: Directory) {
       return;
     }
     try {
-      const watcher = runInObservationContext(() =>
+      const watcher = runInDetachedAsyncContext(() =>
         fs.watch(candidate, { persistent: false }, (event, filename) => {
           const source = sources.get(candidate);
           if (!source || source.watcher !== watcher) {
@@ -107,7 +105,7 @@ export function observeOwnedDirectory(
   const selected = directory;
   const listener: Listener = (filename) => onChange(filename);
   selected.listeners.add(listener);
-  fallback ??= runInObservationContext(() =>
+  fallback ??= runInDetachedAsyncContext(() =>
     setInterval(() => {
       const observed = Array.from(directories.values());
       for (const entry of observed) {

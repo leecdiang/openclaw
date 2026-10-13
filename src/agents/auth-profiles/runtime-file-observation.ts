@@ -24,12 +24,15 @@ export function createRuntimeAuthProfileFileObservation({
 }: {
   snapshots: ReadonlyMap<string, OwnedRuntimeSnapshot>;
   rowsCache: ReturnType<typeof createRuntimeAuthProfileRowsCache>;
-  invalidatePaths: (paths: readonly string[]) => void;
+  invalidatePaths: (
+    paths: readonly string[],
+    isCurrent?: (databasePath: string) => boolean,
+  ) => void;
 }) {
   let refreshExternalAuth: ((paths: readonly string[]) => Promise<boolean>) | undefined;
   let externalRefresh: Promise<void> | undefined;
   let externalRefreshRevision = 0;
-  const externalChanges = new Set<string>();
+  const externalChanges = new Map<string, ReadonlyMap<string, OwnedRuntimeSnapshot>>();
 
   /** Only canonical reads and committed local stores establish file-backed source provenance. */
   function recordRuntimeAuthProfilePersistedStore(
@@ -69,8 +72,11 @@ export function createRuntimeAuthProfileFileObservation({
   }
 
   function refreshExternalAuthPaths(paths: readonly string[]): void {
-    for (const pathname of paths) {
-      externalChanges.add(pathname);
+    if (paths.length) {
+      const expected = new Map(snapshots);
+      for (const pathname of paths) {
+        externalChanges.set(pathname, expected);
+      }
     }
     if (externalRefresh || !externalChanges.size) {
       return;
@@ -83,15 +89,23 @@ export function createRuntimeAuthProfileFileObservation({
         }
         const pending = [...externalChanges];
         externalChanges.clear();
+        const invalidateCurrent = () => {
+          for (const [pathname, captured] of pending) {
+            invalidatePaths([pathname], (target) => snapshots.get(target) === captured.get(target));
+          }
+        };
         try {
-          if (!(await refreshExternalAuth?.(pending)) && revision === externalRefreshRevision) {
-            invalidatePaths(pending);
+          if (
+            !(await refreshExternalAuth?.(pending.map(([pathname]) => pathname))) &&
+            revision === externalRefreshRevision
+          ) {
+            invalidateCurrent();
           }
         } catch (error) {
           if (revision !== externalRefreshRevision) {
             return;
           }
-          invalidatePaths(pending);
+          invalidateCurrent();
           reportCommittedInlineAuthFailure("Auth file observation refresh failed", error);
         }
       }
