@@ -194,7 +194,7 @@ export function createRuntimeAuthProfileRowsCache(
                 continue;
               }
               if (
-                !rows?.cacheable ||
+                !rows ||
                 source === undefined ||
                 rows.store.status === "unreadable" ||
                 rows.state.status === "unreadable" ||
@@ -202,11 +202,11 @@ export function createRuntimeAuthProfileRowsCache(
               ) {
                 entries.delete(databasePath);
                 changed.set(databasePath, entry);
-              } else {
+              } else if (rows.cacheable && entry.writeToken !== undefined) {
                 freezeJsonSnapshot(rows);
-                if (entry.writeToken !== undefined) {
-                  entry.rows ??= rows;
-                }
+                entry.rows ??= rows;
+              } else {
+                entry.rows = undefined;
               }
             }
           }
