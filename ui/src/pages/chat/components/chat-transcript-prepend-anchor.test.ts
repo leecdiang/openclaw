@@ -137,8 +137,9 @@ describe("transcript prepend anchor", () => {
       let deferNativeScroll = false;
       bubble.getBoundingClientRect = () => rect(contentTop - scroller.scrollTop, 180);
       scroller.scrollTop = 200;
-      scroller.scrollTo = (options: ScrollToOptions | number, y?: number) => {
-        const target = typeof options === "number" ? (y ?? 0) : (options.top ?? scroller.scrollTop);
+      scroller.scrollTo = (options?: ScrollToOptions | number, y?: number) => {
+        const target =
+          typeof options === "number" ? (y ?? 0) : (options?.top ?? scroller.scrollTop);
         const write = () => {
           const before = scroller.scrollTop;
           scroller.scrollTop = Math.max(
