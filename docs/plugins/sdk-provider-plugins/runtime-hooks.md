@@ -107,8 +107,8 @@ Existing one-argument hooks remain compatible, and direct callers can omit confi
     Existing wrappers may still pass the deprecated `maxRetries` stream option,
     including `0`. Built-in text transports ignore it: the embedded runner owns
     retry budgeting, and SDK-internal retries stay disabled. New wrappers should
-    omit the option. This shipped source contract is retained until a future
-    Plugin SDK major release and a published-plugin reader sweep confirm removal
+    omit the option. This shipped source contract is retained until a separately
+    announced ordinary stable release and a published-plugin reader sweep confirm removal
     is safe; it does not change image-generation or native-runtime retry policy.
 
   </Tab>
@@ -205,6 +205,11 @@ prefix separately, and consume the marker before sending any payload.
 Use `stripSystemPromptCacheBoundary` when caching is disabled. By default,
 OpenClaw strips the marker before invoking a custom transport.
 
+Google-family transports can use `buildGoogleSimpleThinking` and
+`buildGoogleGenerationConfig` from the same runtime entrypoint. They share the
+Gemini/Vertex thinking policy, including the output-token reservation; pass the
+caller's original `maxTokens` once, before serializing the request.
+
 For custom `createStreamFn` transports that accumulate JSON tool arguments,
 use `createToolArgumentPreviewSchedule()` from `openclaw/plugin-sdk/llm`.
 Create one schedule per tool call and pass the accumulated raw string's
@@ -254,7 +259,7 @@ Cancelled preparation must reject after cleanup, not report a missing login.
 | `prepareExtraParams`              | Default request params                                                                      |
 | `createStreamFn`                  | Fully custom StreamFn transport                                                             |
 | `wrapStreamFn`                    | Custom headers/body wrappers on the normal stream path                                      |
-| `reconcileLocalService`           | Cheap, idempotent managed-service repair after health and before every request              |
+| `reconcileLocalService`           | Cheap managed-service repair safe to repeat after health and before every request           |
 | `resolveTransportTurnState`       | Native per-turn headers/metadata and WebSocket headers/cool-down                            |
 | `resolveWebSocketSessionPolicy`   | Deprecated WebSocket compatibility hook; use `resolveTransportTurnState`                    |
 | `formatApiKey`                    | Custom runtime token shape                                                                  |

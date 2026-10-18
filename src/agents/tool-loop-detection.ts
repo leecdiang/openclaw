@@ -23,7 +23,6 @@ import { isKnownPollToolCall } from "./tool-loop-call-kind.js";
 import { getNoProgressStreak } from "./tool-loop-no-progress.js";
 import { digestToolOutcome } from "./tool-loop-outcome-hash.js";
 import { TOOL_LOOP_WARNING_THRESHOLD } from "./tool-loop-thresholds.js";
-import { isWriteNoProgressOutcome } from "./tool-loop-write-outcome.js";
 import { isToolResultError } from "./tool-result-error.js";
 import { getComputerToolOutcome } from "./tools/computer-tool-outcome.js";
 import { getProgressCardToolOutcome } from "./tools/progress-card-tool-outcome.js";
@@ -370,7 +369,8 @@ function hashToolOutcome(
         : { resultHash: execHash };
     }
   }
-  if (toolName === "write" && isWriteNoProgressOutcome(details)) {
+  // Display text echoes the path; the structured flag owns the no-progress fact.
+  if (toolName === "write" && details.changed === false) {
     return { resultHash: digestToolOutcome({ status: "unchanged" }), noProgress: true };
   }
   if (isKnownPollToolCall(toolName, params) && toolName === "process" && isPlainObject(params)) {
@@ -564,14 +564,14 @@ export function detectToolCallLoop(
 
   if (noProgressStreak >= GLOBAL_CIRCUIT_BREAKER_THRESHOLD) {
     log.error(
-      `Global circuit breaker triggered: ${toolName} repeated ${noProgressStreak} times with no progress`,
+      `Runaway-loop limit reached: ${toolName} repeated ${noProgressStreak} times with no progress`,
     );
     return {
       stuck: true,
       level: "critical",
       detector: "global_circuit_breaker",
       count: noProgressStreak,
-      message: `CRITICAL: ${toolName} repeated identical no-progress outcomes ${noProgressStreak} times. Session execution blocked by global circuit breaker to prevent runaway loops.`,
+      message: `CRITICAL: ${toolName} repeated identical no-progress outcomes ${noProgressStreak} times. Session execution blocked by the runaway-loop limit to prevent runaway loops.`,
       warningKey: `global:${toolName}:${currentHash}:${noProgress.latestResultHash ?? "none"}`,
     };
   }

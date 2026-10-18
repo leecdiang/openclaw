@@ -94,6 +94,7 @@ async function withDemandFixture(
       prepareSessionPlacement: async (sessionId: string) => {
         let released = false;
         return {
+          prepareRead: () => undefined,
           current: () => {
             if (released) {
               throw new Error("Worker placement observation is no longer current");
@@ -187,7 +188,7 @@ async function withDemandFixture(
     };
     const heldTurns = new Map<string, HeldTurn>();
     // Preserve the real admission/ACK; the simulated node has not published a physical launch yet.
-    vi.spyOn(chatDispatch, "startChatDispatch").mockImplementation((turn) => {
+    vi.spyOn(chatDispatch, "startChatDispatch").mockImplementation(async (turn) => {
       heldTurns.set(turn.session.entry!.sessionId, turn);
     });
     const sessionKey = (id: string) => `agent:main:${id}`;

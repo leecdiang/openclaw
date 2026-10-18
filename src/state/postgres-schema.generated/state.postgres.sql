@@ -30,6 +30,8 @@ CREATE TABLE "acp_sessions" (
   "agent" text COLLATE "C" NOT NULL,
   "runtime_session_name" text COLLATE "C" NOT NULL,
   "identity_json" text COLLATE "C",
+  "resume_agent_session_id" text COLLATE "C",
+  "resume_acpx_session_id" text COLLATE "C",
   "mode" text COLLATE "C" NOT NULL,
   "runtime_options_json" text COLLATE "C",
   "cwd" text COLLATE "C",
@@ -58,21 +60,6 @@ CREATE TABLE "agent_databases" (
   "last_seen_at" bigint NOT NULL,
   "size_bytes" bigint,
   PRIMARY KEY ("agent_id", "path")
-);
-
-CREATE TABLE "agent_deletion_journal" (
-  "agent_id" text COLLATE "C" NOT NULL,
-  "operation_id" text COLLATE "C" NOT NULL DEFAULT '',
-  "phase" text COLLATE "C",
-  "agent_dir" text COLLATE "C" NOT NULL,
-  "workspace_dir" text COLLATE "C" NOT NULL,
-  "sessions_dir" text COLLATE "C" NOT NULL,
-  "database_paths_json" text COLLATE "C" NOT NULL DEFAULT '[]',
-  "cleanup_paths_json" text COLLATE "C" NOT NULL DEFAULT '[]',
-  "created_at" bigint NOT NULL,
-  "cleanup_completed" bigint NOT NULL DEFAULT 0,
-  "delete_files" bigint NOT NULL DEFAULT 1,
-  PRIMARY KEY ("agent_id")
 );
 
 CREATE TABLE "apns_registration_tombstones" (
@@ -687,6 +674,7 @@ CREATE TABLE "mcp_oauth_stores" (
 );
 
 CREATE TABLE "meeting_transcript_sessions" (
+  "started_at_ms" bigint,
   "session_id" text COLLATE "C" NOT NULL,
   "started_at" text COLLATE "C" NOT NULL,
   "selector" text COLLATE "C" NOT NULL,
@@ -800,6 +788,7 @@ CREATE TABLE "official_external_plugin_catalog_snapshots" (
 );
 
 CREATE TABLE "operator_approvals" (
+  "cursor_id" bigint NOT NULL,
   "approval_id" text COLLATE "C" NOT NULL,
   "resolution_ref" text COLLATE "C" NOT NULL,
   "kind" text COLLATE "C" NOT NULL,
@@ -1379,13 +1368,15 @@ CREATE TABLE "worktrees" (
   CHECK (("owner_kind" IN ('manual', 'workboard', 'session')))
 );
 
-CREATE INDEX "idx_acp_replay_events_session_seq" ON "acp_replay_events" (("session_id") ASC NULLS FIRST, ("seq") ASC NULLS FIRST);
-
 CREATE INDEX "idx_acp_replay_sessions_key_updated" ON "acp_replay_sessions" (("session_key") ASC NULLS FIRST, ("complete") ASC NULLS FIRST, ("updated_at") DESC NULLS LAST, ("session_id") ASC NULLS FIRST);
 
 CREATE INDEX "idx_acp_replay_sessions_updated" ON "acp_replay_sessions" (("updated_at") DESC NULLS LAST, ("session_id") ASC NULLS FIRST);
 
 CREATE INDEX "idx_acp_sessions_agent_activity" ON "acp_sessions" (("agent") ASC NULLS FIRST, ("last_activity_at") DESC NULLS LAST, ("session_key") ASC NULLS FIRST);
+
+CREATE INDEX "idx_acp_sessions_resume_acpx" ON "acp_sessions" (("resume_acpx_session_id") ASC NULLS FIRST);
+
+CREATE INDEX "idx_acp_sessions_resume_agent" ON "acp_sessions" (("resume_agent_session_id") ASC NULLS FIRST);
 
 CREATE INDEX "idx_acp_sessions_state_activity" ON "acp_sessions" (("state") ASC NULLS FIRST, ("last_activity_at") DESC NULLS LAST, ("session_key") ASC NULLS FIRST);
 
@@ -1483,6 +1474,8 @@ CREATE INDEX "idx_meeting_transcript_sessions_account" ON "meeting_transcript_se
 
 CREATE INDEX "idx_meeting_transcript_sessions_agent" ON "meeting_transcript_sessions" (("metadata_agent_id") ASC NULLS FIRST);
 
+CREATE INDEX "idx_meeting_transcript_sessions_chronology" ON "meeting_transcript_sessions" (("started_at_ms") DESC NULLS LAST, ("session_id") ASC NULLS FIRST, ("started_at") ASC NULLS FIRST);
+
 CREATE INDEX "idx_meeting_transcript_sessions_export_key" ON "meeting_transcript_sessions" (("export_key") ASC NULLS FIRST);
 
 CREATE INDEX "idx_meeting_transcript_sessions_id" ON "meeting_transcript_sessions" (("session_id") ASC NULLS FIRST, ("started_at") DESC NULLS LAST);
@@ -1504,6 +1497,8 @@ CREATE INDEX "idx_migration_sources_run" ON "migration_sources" (("last_run_id")
 CREATE INDEX "idx_native_hook_relay_bridges_expires" ON "native_hook_relay_bridges" (("expires_at_ms") ASC NULLS FIRST, ("relay_id") ASC NULLS FIRST);
 
 CREATE INDEX "idx_official_external_plugin_catalog_snapshots_updated" ON "official_external_plugin_catalog_snapshots" (("updated_at_ms") DESC NULLS LAST, ("feed_url") ASC NULLS FIRST);
+
+CREATE UNIQUE INDEX "idx_operator_approvals_cursor_id" ON "operator_approvals" (("cursor_id") ASC NULLS FIRST);
 
 CREATE UNIQUE INDEX "idx_operator_approvals_resolution_ref" ON "operator_approvals" (("resolution_ref") ASC NULLS FIRST);
 
@@ -1545,11 +1540,9 @@ CREATE INDEX "idx_skill_uploads_expiry" ON "skill_uploads" (("expires_at") ASC N
 
 CREATE INDEX "idx_skill_uploads_idempotency" ON "skill_uploads" (("idempotency_key_hash") ASC NULLS FIRST) WHERE "idempotency_key_hash" IS NOT NULL;
 
-CREATE INDEX "idx_skill_usage_key" ON "skill_usage" (("skill_key") ASC NULLS FIRST, ("skill_file") ASC NULLS FIRST);
-
 CREATE INDEX "idx_state_leases_expiry" ON "state_leases" (("expires_at") ASC NULLS FIRST, ("scope") ASC NULLS FIRST, ("lease_key") ASC NULLS FIRST) WHERE "expires_at" IS NOT NULL;
 
-CREATE INDEX "idx_state_leases_owner" ON "state_leases" (("owner") ASC NULLS FIRST, ("updated_at") DESC NULLS LAST);
+CREATE INDEX "idx_state_leases_owner" ON "state_leases" (("owner") ASC NULLS FIRST);
 
 CREATE INDEX "idx_subagent_runs_child_session_key" ON "subagent_runs" (("child_session_key") ASC NULLS FIRST, ("created_at") DESC NULLS LAST, ("run_id") ASC NULLS FIRST);
 
@@ -1557,27 +1550,11 @@ CREATE INDEX "idx_subagent_runs_controller_session_key" ON "subagent_runs" (("co
 
 CREATE INDEX "idx_subagent_runs_requester_session_key" ON "subagent_runs" (("requester_session_key") ASC NULLS FIRST, ("created_at") DESC NULLS LAST, ("run_id") ASC NULLS FIRST);
 
-CREATE INDEX "idx_task_runs_child_session_key" ON "task_runs" (("child_session_key") ASC NULLS FIRST);
+CREATE INDEX "idx_task_runs_cron_runtime_order" ON "task_runs" (("runtime") ASC NULLS FIRST, ("created_at") ASC NULLS FIRST, ("task_id") ASC NULLS FIRST) WHERE ("runtime" = 'cron');
 
-CREATE INDEX "idx_task_runs_cleanup_after" ON "task_runs" (("cleanup_after") ASC NULLS FIRST);
+CREATE INDEX "idx_task_runs_cron_source_order" ON "task_runs" (("source_id") ASC NULLS FIRST, ("created_at") ASC NULLS FIRST, ("task_id") ASC NULLS FIRST) WHERE ("runtime" = 'cron');
 
-CREATE INDEX "idx_task_runs_last_event_at" ON "task_runs" (("last_event_at") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_owner_key" ON "task_runs" (("owner_key") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_parent_flow_id" ON "task_runs" (("parent_flow_id") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_requester_session_key" ON "task_runs" (("requester_session_key") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_run_id" ON "task_runs" (("run_id") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_runtime_ended" ON "task_runs" (("runtime") ASC NULLS FIRST, ("ended_at") ASC NULLS FIRST, ("created_at") ASC NULLS FIRST, ("task_id") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_runtime_source_ended" ON "task_runs" (("runtime") ASC NULLS FIRST, ("source_id") ASC NULLS FIRST, ("ended_at") ASC NULLS FIRST, ("created_at") ASC NULLS FIRST, ("task_id") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_runtime_status" ON "task_runs" (("runtime") ASC NULLS FIRST, ("status") ASC NULLS FIRST);
-
-CREATE INDEX "idx_task_runs_status" ON "task_runs" (("status") ASC NULLS FIRST);
+CREATE INDEX "idx_task_runs_runtime_run" ON "task_runs" (("runtime") ASC NULLS FIRST, ("run_id") ASC NULLS FIRST, ("source_id") ASC NULLS FIRST, ("created_at") ASC NULLS FIRST, ("task_id") ASC NULLS FIRST);
 
 CREATE INDEX "idx_web_push_subscriptions_updated" ON "web_push_subscriptions" (("updated_at_ms") DESC NULLS LAST, ("subscription_id") ASC NULLS FIRST);
 

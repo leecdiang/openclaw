@@ -25,20 +25,13 @@ vi.mock("openclaw/plugin-sdk/database-engine-runtime", async (importOriginal) =>
     await importOriginal<typeof import("openclaw/plugin-sdk/database-engine-runtime")>();
   return {
     ...actual,
-    openEngineWorkerStore: async (...args: Parameters<typeof actual.openEngineWorkerStore>) => {
-      const worker = await actual.openEngineWorkerStore(...args);
-      if (worker) {
-        const execute = worker.execute.bind(worker);
-        vi.spyOn(worker, "execute").mockImplementation(async (command, options) => {
-          const result = await execute(command, options);
-          if (workerReads.enabled) {
-            workerReads.calls += 1;
-            workerReads.bytes += Buffer.byteLength(JSON.stringify(result) ?? "");
-          }
-          return result;
-        });
+    runEngineStoreOperation: async (...args: Parameters<typeof actual.runEngineStoreOperation>) => {
+      const result = await actual.runEngineStoreOperation(...args);
+      if (workerReads.enabled) {
+        workerReads.calls += 1;
+        workerReads.bytes += Buffer.byteLength(JSON.stringify(result) ?? "");
       }
-      return worker;
+      return result;
     },
   };
 });
@@ -337,7 +330,7 @@ describe("Team Reports HTTP responses", () => {
       `href="https://127.0.0.1:${port}/reports/day/2026-08-20/" target="_blank" rel="noopener" data-report-open-window aria-label="Open in a new window"`,
     );
     expect(response.body).toContain('href="/reports/people/alice/"');
-    expect(response.body).toContain("Deterministic summary");
+    expect(response.body).toContain("Summary without a model");
     expect(response.body).toContain("Fixture coverage warning");
     expect(response.body).toContain("Model summary unavailable: completion failed");
     expect(response.body).toContain("GitHub coverage is incomplete");

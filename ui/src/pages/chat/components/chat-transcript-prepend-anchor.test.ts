@@ -1,6 +1,5 @@
 /* @vitest-environment jsdom */
-import { VirtualizerController } from "@tanstack/lit-virtual";
-import type { Virtualizer } from "@tanstack/virtual-core";
+import { Virtualizer } from "@tanstack/virtual-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TranscriptEndAnchor } from "./chat-transcript-end-anchor.ts";
 import {
@@ -166,33 +165,25 @@ describe("transcript prepend anchor", () => {
         isProgrammaticScroll: () => isTranscriptProgrammaticScroll(state, scroller),
         cancelScroll: () => anchor.clear(),
         onLayoutCorrection: vi.fn(),
-        requestUpdate: vi.fn(),
+        invalidate: vi.fn(),
         onOffset: vi.fn(() => false),
         onReaderScroll: vi.fn(),
         onComposerLayout: vi.fn(),
       };
-      const controller = new VirtualizerController<HTMLDivElement, HTMLElement>(
-        {
-          addController: vi.fn(),
-          removeController: vi.fn(),
-          requestUpdate: vi.fn(),
-          updateComplete: Promise.resolve(true),
-        },
-        {
-          count: 1,
-          estimateSize: () => 2000,
-          initialOffset: 200,
-          getScrollElement: () => scroller,
-          observeElementRect: (_, callback) => callback({ width: 800, height: 500 }),
-          observeElementOffset: (virtualizer, callback) =>
-            observeTranscriptOffset(owner, virtualizer, callback),
-          scrollToFn: (offset, options, virtualizer) =>
-            scrollTranscriptOffset(state, offset, options, virtualizer),
-        },
-      );
-      const instance = controller.getVirtualizer();
-      controller.hostConnected();
-      controller.hostUpdated();
+      const instance = new Virtualizer<HTMLDivElement, HTMLElement>({
+        count: 1,
+        estimateSize: () => 2000,
+        initialOffset: 200,
+        getScrollElement: () => scroller,
+        observeElementRect: (_, callback) => callback({ width: 800, height: 500 }),
+        observeElementOffset: (virtualizer, callback) =>
+          observeTranscriptOffset(owner, virtualizer, callback),
+        scrollToFn: (offset, options, virtualizer) =>
+          scrollTranscriptOffset(state, offset, options, virtualizer),
+      });
+      const { _didMount: mountVirtualizer, _willUpdate: updateVirtualizer } = instance;
+      const dispose = mountVirtualizer();
+      updateVirtualizer();
       try {
         anchor.messageKeys = messages("visible");
         anchor.capture(scroller, false);
@@ -228,7 +219,7 @@ describe("transcript prepend anchor", () => {
         expect(bubble.getBoundingClientRect().top).toBe(110 + rounding);
       } finally {
         anchor.clear();
-        controller.hostDisconnected();
+        dispose();
         vi.useRealTimers();
       }
     },
@@ -333,36 +324,28 @@ describe("transcript prepend anchor", () => {
       isProgrammaticScroll: () => false,
       cancelScroll: () => anchor.clear(),
       onLayoutCorrection: vi.fn(),
-      requestUpdate: vi.fn(),
+      invalidate: vi.fn(),
       onOffset: vi.fn(() => false),
       onReaderScroll: vi.fn(),
       onComposerLayout: vi.fn(),
     };
-    const controller = new VirtualizerController<HTMLDivElement, HTMLElement>(
-      {
-        addController: vi.fn(),
-        removeController: vi.fn(),
-        requestUpdate: vi.fn(),
-        updateComplete: Promise.resolve(true),
+    const instance = new Virtualizer<HTMLDivElement, HTMLElement>({
+      count: 1,
+      estimateSize: () => 2000,
+      initialOffset: 200,
+      getScrollElement: () => scroller,
+      observeElementRect: (_, callback) => {
+        callback({ width: 800, height: 500 });
       },
-      {
-        count: 1,
-        estimateSize: () => 2000,
-        initialOffset: 200,
-        getScrollElement: () => scroller,
-        observeElementRect: (_, callback) => {
-          callback({ width: 800, height: 500 });
-        },
-        observeElementOffset: (virtualizer, callback) =>
-          observeTranscriptOffset(owner, virtualizer, callback),
-        scrollToFn: (offset) => {
-          scroller.scrollTop = offset;
-        },
+      observeElementOffset: (virtualizer, callback) =>
+        observeTranscriptOffset(owner, virtualizer, callback),
+      scrollToFn: (offset) => {
+        scroller.scrollTop = offset;
       },
-    );
-    const instance = controller.getVirtualizer();
-    controller.hostConnected();
-    controller.hostUpdated();
+    });
+    const { _didMount: mountVirtualizer, _willUpdate: updateVirtualizer } = instance;
+    const dispose = mountVirtualizer();
+    updateVirtualizer();
     scroller.dispatchEvent(new Event("scroll"));
     try {
       scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -40 }));
@@ -376,7 +359,7 @@ describe("transcript prepend anchor", () => {
       expect(scroller.scrollTop).toBe(190);
       expect(bubble.getBoundingClientRect().top).toBe(130);
     } finally {
-      controller.hostDisconnected();
+      dispose();
     }
   });
 });
